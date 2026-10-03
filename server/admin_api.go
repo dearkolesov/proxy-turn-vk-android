@@ -163,8 +163,8 @@ func handleAdminListPasswords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dbMutex.Lock()
-	if globalWgDev != nil {
-		cleanupExpiredPasswordsLocked(globalWgDev)
+	if globalWgDev != nil && cleanupExpiredPasswordsLocked(globalWgDev) > 0 {
+		saveDB()
 	}
 	views := make([]adminPasswordView, 0, len(db.Passwords))
 	for pass, entry := range db.Passwords {
@@ -173,7 +173,6 @@ func handleAdminListPasswords(w http.ResponseWriter, r *http.Request) {
 		}
 		views = append(views, toAdminPasswordView(pass, entry))
 	}
-	saveDB()
 	dbMutex.Unlock()
 
 	writeAdminJSON(w, http.StatusOK, map[string]interface{}{"passwords": views})

@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -200,30 +199,32 @@ func authenticateProfileRequest(r *http.Request, action string) (string, string,
 	if !exists || !expires.After(now) {
 		return "", "", false
 	}
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-	for password, entry := range db.Passwords {
-		candidateKeyID := profileKeyID(password)
-		if subtle.ConstantTimeCompare([]byte(candidateKeyID), []byte(keyID)) != 1 || isPasswordExpired(entry) || entry.IsDeactivated {
-			continue
-		}
-		mac := hmac.New(sha256.New, []byte(password))
-		mac.Write([]byte(action + "\n" + deviceID + "\n" + nonce))
-		if hmac.Equal(proof, mac.Sum(nil)) {
-			profileChallenges.Lock()
-			currentExpiry, stillExists := profileChallenges.items[nonce]
-			if stillExists && currentExpiry.After(time.Now()) {
-				delete(profileChallenges.items, nonce)
-			}
-			profileChallenges.Unlock()
-			if !stillExists || !currentExpiry.After(time.Now()) {
-				return "", "", false
-			}
-			return password, deviceID, true
-		}
+	password, indexed := serverWrapKeys.ProfilePassword(keyID)
+	if !indexed {
 		return "", "", false
 	}
-	return "", "", false
+
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+	entry, exists := db.Passwords[password]
+	if !exists || isPasswordExpired(entry) || entry.IsDeactivated {
+		return "", "", false
+	}
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte(action + "\n" + deviceID + "\n" + nonce))
+	if !hmac.Equal(proof, mac.Sum(nil)) {
+		return "", "", false
+	}
+	profileChallenges.Lock()
+	currentExpiry, stillExists := profileChallenges.items[nonce]
+	if stillExists && currentExpiry.After(time.Now()) {
+		delete(profileChallenges.items, nonce)
+	}
+	profileChallenges.Unlock()
+	if !stillExists || !currentExpiry.After(time.Now()) {
+		return "", "", false
+	}
+	return password, deviceID, true
 }
 
 func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {

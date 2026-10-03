@@ -157,6 +157,12 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		isMainPass := password != "" && password == db.MainPassword
 		entry, isGenPass := db.Passwords[password]
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
+		entryDeviceIDBefore := ""
+		entryDeviceIDsBefore := 0
+		if isGenPass && entry != nil {
+			entryDeviceIDBefore = entry.DeviceID
+			entryDeviceIDsBefore = len(entry.DeviceIDs)
+		}
 
 		if valid && isGenPass && entry.IsDeactivated {
 			clientConn.Write([]byte("DENIED:deactivated"))
@@ -170,17 +176,18 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			dbMutex.Unlock()
 			return
 		} else if valid {
+			bindingChanged := isGenPass && (entry.DeviceID != entryDeviceIDBefore || len(entry.DeviceIDs) != entryDeviceIDsBefore)
 			connDeviceID = deviceID
 			authenticatedPassword = password
 
-			// Сохраняем БД, так как canConnectAndBind мог внести привязку нового устройства
-			saveDB()
-
 			dev, exists := db.Devices[deviceID]
+			deviceChanged := !exists
 			if !exists {
 				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
 			}
+			ownerIDBefore := dev.OwnerID
 			setDeviceOwner(dev, password)
+			deviceChanged = deviceChanged || ownerIDBefore != dev.OwnerID
 			// Устройство могло быть создано раньше только Raw-путём
 			// (GETCONF_RAW, см. handleConnRaw) — там PrivKey/PubKey никогда
 			// не генерируются, только IP/RawIP. Без этой проверки такое
@@ -197,7 +204,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 					dev.PrivKey = privB64
 					dev.PubKey = pubB64
 					db.Devices[deviceID] = dev
-					saveDB()
+					deviceChanged = true
 					log.Printf("[WG] Сгенерированы ключи для устройства %s (IP: %s)", deviceID, dev.IP)
 				} else {
 					dev = nil
@@ -205,6 +212,9 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			}
 			if dev != nil {
 				upsertPeerInWG(wgDev, dev)
+				if bindingChanged || deviceChanged {
+					saveDB()
+				}
 				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
 			} else {
 				clientConn.Write([]byte("NOCONF"))
@@ -260,7 +270,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			clientConn.Write([]byte("DENIED:device_mismatch"))
 			return
 		}
-		saveDB()
 		dbMutex.Unlock()
 
 		connDeviceID = deviceID

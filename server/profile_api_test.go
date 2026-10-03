@@ -1,6 +1,13 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -91,5 +98,53 @@ func TestCleanupProfileChallengeStateRemovesExpiredEntries(t *testing.T) {
 	}
 	if _, exists := profileChallenges.buckets["active"]; !exists {
 		t.Fatal("active rate bucket was removed")
+	}
+}
+
+func TestAuthenticateProfileRequestUsesIndexAndConsumesNonce(t *testing.T) {
+	previousDB := db
+	previousKeyStore := serverWrapKeys
+	defer func() {
+		db = previousDB
+		serverWrapKeys = previousKeyStore
+		resetProfileChallengeStateForTest()
+	}()
+	resetProfileChallengeStateForTest()
+
+	password := "profile-test-password"
+	deviceID := "profile-test-device"
+	nonce := "single-use-test-nonce"
+	db = &Database{
+		Passwords: map[string]*PasswordEntry{password: {ExpiresAt: time.Now().Add(time.Hour).Unix(), MaxDevices: 1}},
+		Devices:   make(map[string]*ClientDevice),
+	}
+	serverWrapKeys = newWrapKeyStore()
+	if err := serverWrapKeys.SetPasswords("", []string{password}); err != nil {
+		t.Fatalf("SetPasswords() error = %v", err)
+	}
+	profileChallenges.Lock()
+	profileChallenges.items[nonce] = time.Now().Add(time.Minute)
+	profileChallenges.Unlock()
+
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("status\n" + deviceID + "\n" + nonce))
+	form := url.Values{
+		"device_id": {deviceID},
+		"nonce":     {nonce},
+		"key_id":    {profileKeyID(password)},
+		"proof":     {hex.EncodeToString(mac.Sum(nil))},
+	}
+	newRequest := func() *http.Request {
+		request := httptest.NewRequest("POST", "/api/profile/status", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return request
+	}
+
+	gotPassword, gotDeviceID, valid := authenticateProfileRequest(newRequest(), "status")
+	if !valid || gotPassword != password || gotDeviceID != deviceID {
+		t.Fatalf("authenticateProfileRequest() = (%q, %q, %t)", gotPassword, gotDeviceID, valid)
+	}
+	if _, _, valid := authenticateProfileRequest(newRequest(), "status"); valid {
+		t.Fatal("a consumed nonce was accepted a second time")
 	}
 }

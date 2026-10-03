@@ -356,12 +356,13 @@ type wrapKeyEntry struct {
 }
 
 type wrapKeyStore struct {
-	mu      sync.RWMutex
-	entries []wrapKeyEntry
+	mu               sync.RWMutex
+	entries          []wrapKeyEntry
+	profilePasswords map[string]string
 }
 
 func newWrapKeyStore() *wrapKeyStore {
-	return &wrapKeyStore{}
+	return &wrapKeyStore{profilePasswords: make(map[string]string)}
 }
 
 func deriveWrapKey(password string) ([]byte, error) {
@@ -395,6 +396,7 @@ func zeroBytes(b []byte) {
 func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) error {
 	next := make([]wrapKeyEntry, 0, len(generated)+1)
 	seen := make(map[string]struct{}, len(generated)+1)
+	nextProfilePasswords := make(map[string]string, len(generated))
 
 	if mainPassword != "" {
 		key, err := deriveWrapKey(mainPassword)
@@ -423,11 +425,13 @@ func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) err
 		}
 		next = append(next, wrapKeyEntry{id: id, key: key})
 		seen[id] = struct{}{}
+		nextProfilePasswords[profileKeyID(password)] = password
 	}
 
 	s.mu.Lock()
 	old := s.entries
 	s.entries = next
+	s.profilePasswords = nextProfilePasswords
 	s.mu.Unlock()
 	for _, entry := range old {
 		evictAEAD(entry.key)
@@ -445,13 +449,18 @@ func (s *wrapKeyStore) AddPassword(password string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.profilePasswords == nil {
+		s.profilePasswords = make(map[string]string)
+	}
 	for _, entry := range s.entries {
 		if entry.id == id {
 			zeroBytes(key)
+			s.profilePasswords[profileKeyID(password)] = password
 			return nil
 		}
 	}
 	s.entries = append(s.entries, wrapKeyEntry{id: id, key: key})
+	s.profilePasswords[profileKeyID(password)] = password
 	return nil
 }
 
@@ -460,6 +469,7 @@ func (s *wrapKeyStore) RemovePassword(password string) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.profilePasswords, profileKeyID(password))
 	for i, entry := range s.entries {
 		if entry.id != id {
 			continue
@@ -471,6 +481,13 @@ func (s *wrapKeyStore) RemovePassword(password string) {
 		s.entries = s.entries[:len(s.entries)-1]
 		return
 	}
+}
+
+func (s *wrapKeyStore) ProfilePassword(keyID string) (string, bool) {
+	s.mu.RLock()
+	password, exists := s.profilePasswords[keyID]
+	s.mu.RUnlock()
+	return password, exists
 }
 
 func (s *wrapKeyStore) Count() int {
