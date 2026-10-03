@@ -621,9 +621,6 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	if db.CreateRequests == nil {
 		db.CreateRequests = make(map[string]CreateRequestRecord)
 	}
-	if db.CreateRequests == nil {
-		db.CreateRequests = make(map[string]CreateRequestRecord)
-	}
 	db.MainPassword = mainPass
 	db.AdminID = adminID
 	db.BotToken = botToken
