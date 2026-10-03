@@ -684,10 +684,6 @@ func handleAdminUnbindDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deviceID := r.FormValue("device_id")
-	if deviceID == "" {
-		writeAdminError(w, http.StatusBadRequest, "device_id is required")
-		return
-	}
 
 	dbMutex.Lock()
 	entry, exists := db.Passwords[pass]
@@ -700,7 +696,7 @@ func handleAdminUnbindDevice(w http.ResponseWriter, r *http.Request) {
 	deviceIDsBefore := entryDeviceIDs(entry)
 	removedDevices := make(map[string]*ClientDevice)
 	for _, id := range deviceIDsBefore {
-		if id == deviceID {
+		if deviceID == "" || id == deviceID {
 			if dev, exists := db.Devices[id]; exists {
 				removedDevices[id] = dev
 			}
@@ -725,6 +721,7 @@ func handleAdminUnbindDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func registerAdminAPIRoutes(mux *http.ServeMux) {
+	registerAdminUI(mux)
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/metrics", handlePrometheusMetrics)
 	mux.HandleFunc("/admin/passwords", func(w http.ResponseWriter, r *http.Request) {

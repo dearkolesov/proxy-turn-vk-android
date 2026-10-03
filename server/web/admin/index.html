@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>qWDTT · Доступы</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <section id="login-view" class="login-view">
+      <header class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">q/</span>
+        <span><strong>qWDTT</strong><small>SERVER CONTROL</small></span>
+      </header>
+      <main class="login-panel">
+        <div class="eyebrow">АДМИНИСТРАТИВНЫЙ ДОСТУП</div>
+        <h1>Управление ключами</h1>
+        <p class="login-copy">Введите токен панели, чтобы продолжить.</p>
+        <form id="login-form">
+          <label for="admin-token">Admin token</label>
+          <div class="token-input-wrap">
+            <input
+              id="admin-token"
+              name="token"
+              type="password"
+              autocomplete="current-password"
+              required
+              autofocus
+            />
+            <button
+              id="token-visibility"
+              class="input-action"
+              type="button"
+              aria-label="Показать токен"
+              title="Показать токен"
+            >
+              Показать
+            </button>
+          </div>
+          <button class="button button-primary login-submit" type="submit">
+            Подключиться
+          </button>
+          <p id="login-error" class="form-error" role="alert"></p>
+        </form>
+        <div class="login-foot">
+          <span class="secure-dot"></span> Защищённое соединение
+        </div>
+      </main>
+      <footer class="login-footer">
+        qWDTT <span>·</span> Server administration
+      </footer>
+    </section>
+
+    <div id="app-view" class="app-view" hidden>
+      <header class="topbar">
+        <a class="brand-lockup compact" href="/" aria-label="qWDTT, главная">
+          <span class="brand-mark" aria-hidden="true">q/</span>
+          <span><strong>qWDTT</strong><small>SERVER CONTROL</small></span>
+        </a>
+        <div class="topbar-divider"></div>
+        <div class="crumb">Доступы</div>
+        <div class="topbar-spacer"></div>
+        <div id="server-health" class="health-pill">
+          <span class="health-dot"></span><span>Проверка сервера</span>
+        </div>
+        <button
+          id="refresh-button"
+          class="button button-quiet"
+          type="button"
+          title="Обновить список"
+        >
+          Обновить
+        </button>
+        <button
+          id="logout-button"
+          class="button button-quiet logout-button"
+          type="button"
+        >
+          Выйти
+        </button>
+      </header>
+
+      <main class="workspace">
+        <section class="page-heading">
+          <div>
+            <div class="eyebrow">УПРАВЛЕНИЕ ДОСТУПОМ</div>
+            <h1>Ключи доступа</h1>
+            <p>Профили, устройства и состояние подключений</p>
+          </div>
+          <button
+            id="create-button"
+            class="button button-primary"
+            type="button"
+          >
+            <span class="button-plus" aria-hidden="true">+</span> Новый ключ
+          </button>
+        </section>
+
+        <section class="overview" aria-label="Сводка">
+          <div class="overview-cell">
+            <span class="overview-label">Всего ключей</span
+            ><strong id="total-count">—</strong>
+          </div>
+          <div class="overview-cell">
+            <span class="overview-label">Активны</span
+            ><strong id="enabled-count">—</strong>
+          </div>
+          <div class="overview-cell">
+            <span class="overview-label">Подключено сейчас</span
+            ><strong id="active-count">—</strong>
+          </div>
+          <div class="overview-cell overview-health">
+            <span class="overview-label">API узла</span
+            ><strong id="api-state">—</strong>
+          </div>
+        </section>
+
+        <section class="table-section">
+          <div class="table-toolbar">
+            <div class="filter-tabs" role="tablist" aria-label="Фильтр ключей">
+              <button class="filter-tab active" type="button" data-filter="all">
+                Все <span id="all-tab-count">0</span>
+              </button>
+              <button class="filter-tab" type="button" data-filter="enabled">
+                Активные <span id="enabled-tab-count">0</span>
+              </button>
+              <button class="filter-tab" type="button" data-filter="disabled">
+                Отключённые <span id="disabled-tab-count">0</span>
+              </button>
+            </div>
+            <label class="search-box">
+              <span class="search-icon" aria-hidden="true">⌕</span>
+              <input
+                id="search-input"
+                type="search"
+                placeholder="Поиск по имени, ключу или VK hash"
+                autocomplete="off"
+              />
+              <kbd>/</kbd>
+            </label>
+          </div>
+
+          <div id="error-banner" class="error-banner" role="alert" hidden></div>
+          <div id="loading-state" class="loading-state" hidden>
+            <span class="spinner"></span> Загрузка ключей…
+          </div>
+          <div id="empty-state" class="empty-state" hidden>
+            <span class="empty-mark" aria-hidden="true">0</span>
+            <strong id="empty-title">Ключей пока нет</strong>
+            <span id="empty-copy">Создайте первый ключ доступа.</span>
+            <button
+              id="empty-create-button"
+              class="button button-primary"
+              type="button"
+            >
+              Создать ключ
+            </button>
+          </div>
+          <div id="table-wrap" class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Ключ / владелец</th>
+                  <th>Статус</th>
+                  <th>Устройства</th>
+                  <th>Трафик</th>
+                  <th class="actions-heading">Действия</th>
+                </tr>
+              </thead>
+              <tbody id="key-rows"></tbody>
+            </table>
+          </div>
+          <div class="table-bottom">
+            <span id="result-count">0 записей</span
+            ><span>Последнее обновление <time id="last-updated">—</time></span>
+          </div>
+        </section>
+      </main>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </div>
+
+    <dialog id="editor-dialog" class="dialog">
+      <form id="credential-form" class="dialog-form">
+        <header class="dialog-header">
+          <div>
+            <div class="eyebrow">ДОСТУП</div>
+            <h2 id="editor-title">Новый ключ</h2>
+          </div>
+          <button
+            class="close-button"
+            type="button"
+            data-close="editor-dialog"
+            aria-label="Закрыть"
+          >
+            ×
+          </button>
+        </header>
+        <div class="dialog-content">
+          <label class="field"
+            ><span>Имя / метка</span
+            ><input
+              id="field-label"
+              name="label"
+              maxlength="120"
+              placeholder="Например, Анна · личный доступ"
+          /></label>
+          <label class="field"
+            ><span>VK hash</span
+            ><textarea
+              id="field-vk-hash"
+              name="vk_hash"
+              rows="3"
+              required
+              placeholder="Вставьте один или несколько hash"
+            ></textarea
+            ><small
+              >Несколько hash можно разделить запятой или новой строкой.</small
+            ></label
+          >
+          <div class="field-grid">
+            <label class="field"
+              ><span id="days-label">Срок, дней</span
+              ><input
+                id="field-days"
+                name="days"
+                type="number"
+                min="1"
+                max="365"
+                value="30"
+            /></label>
+            <label class="field"
+              ><span>Лимит устройств</span
+              ><input
+                id="field-max-devices"
+                name="max_devices"
+                type="number"
+                min="1"
+                value="1"
+            /></label>
+          </div>
+          <label id="ports-field" class="field"
+            ><span>Порты <em>необязательно</em></span
+            ><input id="field-ports" name="ports" placeholder="dtls,wg,tun"
+          /></label>
+          <p id="editor-error" class="form-error" role="alert"></p>
+        </div>
+        <footer class="dialog-footer">
+          <button
+            class="button button-quiet"
+            type="button"
+            data-close="editor-dialog"
+          >
+            Отмена</button
+          ><button id="save-button" class="button button-primary" type="submit">
+            Создать ключ
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="details-dialog" class="dialog details-dialog">
+      <section class="dialog-form">
+        <header class="dialog-header">
+          <div>
+            <div class="eyebrow">КАРТОЧКА ДОСТУПА</div>
+            <h2 id="detail-label">Ключ</h2>
+          </div>
+          <button
+            class="close-button"
+            type="button"
+            data-close="details-dialog"
+            aria-label="Закрыть"
+          >
+            ×
+          </button>
+        </header>
+        <div class="dialog-content">
+          <div class="credential-box">
+            <span>Пароль</span><code id="detail-password"></code
+            ><button
+              id="copy-password"
+              class="button button-quiet"
+              type="button"
+            >
+              Копировать
+            </button>
+          </div>
+          <div class="detail-stats">
+            <div><span>Статус</span><strong id="detail-status">—</strong></div>
+            <div>
+              <span>Срок действия</span><strong id="detail-expiry">—</strong>
+            </div>
+            <div>
+              <span>Устройства</span
+              ><strong id="detail-devices-count">—</strong>
+            </div>
+            <div>
+              <span>Подключено</span><strong id="detail-active-count">—</strong>
+            </div>
+            <div>
+              <span>Входящий трафик</span><strong id="detail-down">—</strong>
+            </div>
+            <div>
+              <span>Исходящий трафик</span><strong id="detail-up">—</strong>
+            </div>
+          </div>
+          <div class="device-heading">
+            <div>
+              <h3>Устройства</h3>
+              <span id="device-subtitle">Привязанные устройства</span>
+            </div>
+            <button
+              id="unbind-all-button"
+              class="button button-danger-quiet"
+              type="button"
+            >
+              Отвязать все
+            </button>
+          </div>
+          <div id="device-list" class="device-list"></div>
+          <p id="detail-error" class="form-error" role="alert"></p>
+        </div>
+        <footer class="dialog-footer dialog-actions">
+          <button id="detail-edit" class="button button-quiet" type="button">
+            Изменить</button
+          ><button id="detail-toggle" class="button button-quiet" type="button">
+            Отключить</button
+          ><button
+            id="detail-delete"
+            class="button button-danger"
+            type="button"
+          >
+            Удалить ключ
+          </button>
+        </footer>
+      </section>
+    </dialog>
+  </body>
+</html>

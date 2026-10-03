@@ -237,6 +237,31 @@ func TestAdminMutationsRollbackWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+func TestAdminUnbindDeviceAllowsEmptyIDToUnbindAll(t *testing.T) {
+	cleanup := setupAdminCreateTest(t)
+	defer cleanup()
+	ids := []string{"device-a", "device-b"}
+	db.Passwords["test-password"] = &PasswordEntry{DeviceID: "multi", DeviceIDs: append([]string(nil), ids...), MaxDevices: 4}
+	for _, id := range ids {
+		db.Devices[id] = &ClientDevice{DeviceID: id}
+	}
+	if err := serverWrapKeys.AddPassword("test-password"); err != nil {
+		t.Fatalf("AddPassword() error = %v", err)
+	}
+
+	response := postAdminForm("/admin/passwords/unbind-device", "", url.Values{
+		"password":  {"test-password"},
+		"device_id": {""},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("unbind-all status = %d, body = %s", response.Code, response.Body.String())
+	}
+	entry := db.Passwords["test-password"]
+	if len(db.Devices) != 0 || len(entry.DeviceIDs) != 0 || entry.DeviceID != "" {
+		t.Fatalf("unbind-all left state behind: devices=%d ids=%v legacy=%q", len(db.Devices), entry.DeviceIDs, entry.DeviceID)
+	}
+}
+
 func TestHealthzReportsReadiness(t *testing.T) {
 	previousWGDevice := globalWgDev
 	previousKeyStore := serverWrapKeys
