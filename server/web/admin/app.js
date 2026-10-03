@@ -1,7 +1,9 @@
 (() => {
   const TOKEN_KEY = "qwdtt.adminToken";
+  const SERVER_ADDRESS_KEY = "qwdtt.serverAddress";
   const state = {
     token: sessionStorage.getItem(TOKEN_KEY) || "",
+    serverAddress: localStorage.getItem(SERVER_ADDRESS_KEY) || "",
     entries: [],
     filter: "all",
     query: "",
@@ -72,6 +74,69 @@
       () => node.classList.remove("show"),
       2800,
     );
+  }
+
+  function normalizeServerAddress(value) {
+    let address = value.trim();
+    if (address.startsWith("[") && address.endsWith("]")) {
+      address = address.slice(1, -1).trim();
+    }
+    if (
+      !address ||
+      /[\s/?#@]/.test(address) ||
+      address.includes("\\") ||
+      address.startsWith(".") ||
+      address.endsWith(".") ||
+      (address.indexOf(":") === address.lastIndexOf(":") && address.includes(":"))
+    ) {
+      return "";
+    }
+    return address;
+  }
+
+  function setServerAddressStatus(message, failed = false) {
+    const status = byId("server-address-status");
+    status.textContent = message || "";
+    status.classList.toggle("error", failed);
+  }
+
+  function saveServerAddress() {
+    const address = normalizeServerAddress(byId("server-address").value);
+    if (!address) {
+      setServerAddressStatus("Введите IP-адрес или hostname без схемы и порта.", true);
+      return false;
+    }
+    state.serverAddress = address;
+    localStorage.setItem(SERVER_ADDRESS_KEY, address);
+    byId("server-address").value = address;
+    setServerAddressStatus("Адрес сохранён. Новые ссылки будут использовать его.");
+    if (state.selected) renderDetails();
+    return true;
+  }
+
+  async function detectServerAddress() {
+    const button = byId("detect-server-address");
+    button.disabled = true;
+    setServerAddressStatus("Определяем внешний IP…");
+    try {
+      const response = await fetch("/admin/public-address", {
+        headers: { Authorization: `Bearer ${state.token}` },
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      const address = normalizeServerAddress(payload.address || "");
+      if (!address) throw new Error("Сервис вернул некорректный адрес.");
+      byId("server-address").value = address;
+      saveServerAddress();
+    } catch (error) {
+      setServerAddressStatus(
+        `Не удалось определить адрес: ${error.message || "проверьте соединение"}. Укажите его вручную.`,
+        true,
+      );
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function showApp() {
@@ -392,7 +457,7 @@
       .map((value) => Number.parseInt(value.trim(), 10));
     const dtlsPort = configuredPorts[0] > 0 ? configuredPorts[0] : 56000;
     const appPort = configuredPorts[2] > 0 ? configuredPorts[2] : 9000;
-    const host = window.location.hostname;
+    const host = state.serverAddress || window.location.hostname;
     const peerHost =
       host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
     const params = new URLSearchParams({
@@ -632,6 +697,9 @@
       ),
     );
   byId("copy-password").addEventListener("click", copyPassword);
+  byId("server-address").value = state.serverAddress;
+  byId("save-server-address").addEventListener("click", saveServerAddress);
+  byId("detect-server-address").addEventListener("click", detectServerAddress);
   byId("show-link-button").addEventListener("click", () => {
     byId("quick-link-panel").hidden = !byId("quick-link-panel").hidden;
     byId("qr-panel").hidden = true;

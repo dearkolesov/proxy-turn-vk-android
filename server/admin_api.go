@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -752,6 +753,39 @@ func handleAdminQRCode(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(png)
 }
 
+func handleAdminPublicAddress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !adminAuthorized(r) {
+		writeAdminError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	response, err := client.Get("https://api.ipify.org")
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, "failed to determine public address")
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		writeAdminError(w, http.StatusBadGateway, "public address service returned an error")
+		return
+	}
+	addressBytes, err := io.ReadAll(io.LimitReader(response.Body, 64))
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, "failed to read public address")
+		return
+	}
+	address := strings.TrimSpace(string(addressBytes))
+	if net.ParseIP(address) == nil {
+		writeAdminError(w, http.StatusBadGateway, "public address service returned an invalid address")
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]string{"address": address})
+}
+
 func registerAdminAPIRoutes(mux *http.ServeMux) {
 	registerAdminUI(mux)
 	mux.HandleFunc("/healthz", handleHealthz)
@@ -775,4 +809,5 @@ func registerAdminAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/passwords/update", handleAdminUpdatePassword)
 	mux.HandleFunc("/admin/passwords/unbind-device", handleAdminUnbindDevice)
 	mux.HandleFunc("/admin/qrcode", handleAdminQRCode)
+	mux.HandleFunc("/admin/public-address", handleAdminPublicAddress)
 }
