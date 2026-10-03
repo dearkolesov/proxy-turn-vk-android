@@ -148,3 +148,44 @@ func TestAuthenticateProfileRequestUsesIndexAndConsumesNonce(t *testing.T) {
 		t.Fatal("a consumed nonce was accepted a second time")
 	}
 }
+
+func TestAuthenticateProfileUnbindAllAllowsEmptyDeviceID(t *testing.T) {
+	previousDB := db
+	previousKeyStore := serverWrapKeys
+	defer func() {
+		db = previousDB
+		serverWrapKeys = previousKeyStore
+		resetProfileChallengeStateForTest()
+	}()
+	resetProfileChallengeStateForTest()
+
+	password := "profile-test-password"
+	nonce := "unbind-all-test-nonce"
+	db = &Database{
+		Passwords: map[string]*PasswordEntry{password: {ExpiresAt: time.Now().Add(time.Hour).Unix(), MaxDevices: 4}},
+		Devices:   make(map[string]*ClientDevice),
+	}
+	serverWrapKeys = newWrapKeyStore()
+	if err := serverWrapKeys.SetPasswords("", []string{password}); err != nil {
+		t.Fatalf("SetPasswords() error = %v", err)
+	}
+	profileChallenges.Lock()
+	profileChallenges.items[nonce] = time.Now().Add(time.Minute)
+	profileChallenges.Unlock()
+
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("unbind\n\n" + nonce))
+	form := url.Values{
+		"device_id": {""},
+		"nonce":     {nonce},
+		"key_id":    {profileKeyID(password)},
+		"proof":     {hex.EncodeToString(mac.Sum(nil))},
+	}
+	request := httptest.NewRequest("POST", "/api/profile/unbind", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	gotPassword, gotDeviceID, valid := authenticateProfileRequest(request, "unbind")
+	if !valid || gotPassword != password || gotDeviceID != "" {
+		t.Fatalf("authenticateProfileRequest() = (%q, %q, %t)", gotPassword, gotDeviceID, valid)
+	}
+}

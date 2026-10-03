@@ -189,7 +189,7 @@ func authenticateProfileRequest(r *http.Request, action string) (string, string,
 	nonce := r.FormValue("nonce")
 	keyID := r.FormValue("key_id")
 	proof, err := hex.DecodeString(r.FormValue("proof"))
-	if deviceID == "" || nonce == "" || keyID == "" || err != nil || len(proof) != sha256.Size {
+	if (deviceID == "" && action != "unbind") || nonce == "" || keyID == "" || err != nil || len(proof) != sha256.Size {
 		return "", "", false
 	}
 	now := time.Now()
