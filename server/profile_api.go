@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -62,43 +63,106 @@ func removeDeviceFromSystem(devID string) {
 
 var profileChallenges = struct {
 	sync.Mutex
-	items    map[string]time.Time
-	attempts map[string]adminAuthAttempt
-}{items: make(map[string]time.Time), attempts: make(map[string]adminAuthAttempt)}
+	items   map[string]time.Time
+	buckets map[string]profileChallengeBucket
+}{items: make(map[string]time.Time), buckets: make(map[string]profileChallengeBucket)}
+
+const (
+	profileChallengeRatePerSecond = 250
+	profileChallengeBurst         = 1000
+	profileChallengeMaxEntries    = 32768
+	profileChallengeMaxBuckets    = 65536
+	profileChallengeTTL           = time.Minute
+	profileChallengeBucketTTL     = 2 * time.Minute
+)
+
+type profileChallengeBucket struct {
+	tokens    float64
+	updatedAt time.Time
+}
+
+func allowProfileChallenge(host string, now time.Time) bool {
+	if host == "" {
+		host = "unknown"
+	}
+
+	profileChallenges.Lock()
+	defer profileChallenges.Unlock()
+
+	bucket, exists := profileChallenges.buckets[host]
+	if !exists {
+		if len(profileChallenges.buckets) >= profileChallengeMaxBuckets {
+			for staleHost, staleBucket := range profileChallenges.buckets {
+				if now.Sub(staleBucket.updatedAt) > profileChallengeBucketTTL {
+					delete(profileChallenges.buckets, staleHost)
+				}
+			}
+			if len(profileChallenges.buckets) >= profileChallengeMaxBuckets {
+				return false
+			}
+		}
+		bucket = profileChallengeBucket{tokens: profileChallengeBurst, updatedAt: now}
+	} else {
+		elapsed := now.Sub(bucket.updatedAt).Seconds()
+		if elapsed > 0 {
+			bucket.tokens = min(float64(profileChallengeBurst), bucket.tokens+elapsed*profileChallengeRatePerSecond)
+		}
+		bucket.updatedAt = now
+	}
+
+	if bucket.tokens < 1 {
+		profileChallenges.buckets[host] = bucket
+		return false
+	}
+	bucket.tokens--
+	profileChallenges.buckets[host] = bucket
+	return true
+}
+
+func cleanupProfileChallengeState(now time.Time) {
+	profileChallenges.Lock()
+	for nonce, expires := range profileChallenges.items {
+		if !expires.After(now) {
+			delete(profileChallenges.items, nonce)
+		}
+	}
+	for host, bucket := range profileChallenges.buckets {
+		if now.Sub(bucket.updatedAt) > profileChallengeBucketTTL {
+			delete(profileChallenges.buckets, host)
+		}
+	}
+	profileChallenges.Unlock()
+}
+
+func profileChallengeJanitor(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			cleanupProfileChallengeState(now)
+		}
+	}
+}
 
 func handleAPIProfileChallenge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	now := time.Now()
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	profileChallenges.Lock()
-	for address, attempt := range profileChallenges.attempts {
-		if now.Sub(attempt.windowStart) > time.Minute {
-			delete(profileChallenges.attempts, address)
-		}
-	}
-	attempt := profileChallenges.attempts[host]
-	if attempt.windowStart.IsZero() || now.Sub(attempt.windowStart) > time.Minute {
-		attempt = adminAuthAttempt{windowStart: now}
-	}
-	if attempt.count >= 30 {
-		profileChallenges.Unlock()
+	now := time.Now()
+	if !allowProfileChallenge(host, now) {
 		http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
 		return
 	}
-	attempt.count++
-	profileChallenges.attempts[host] = attempt
-	for value, expires := range profileChallenges.items {
-		if !expires.After(now) {
-			delete(profileChallenges.items, value)
-		}
-	}
-	if len(profileChallenges.items) >= 8192 {
+	profileChallenges.Lock()
+	if len(profileChallenges.items) >= profileChallengeMaxEntries {
 		profileChallenges.Unlock()
 		http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
 		return
@@ -110,7 +174,7 @@ func handleAPIProfileChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nonce := base64.RawURLEncoding.EncodeToString(b)
-	profileChallenges.items[nonce] = now.Add(time.Minute)
+	profileChallenges.items[nonce] = now.Add(profileChallengeTTL)
 	profileChallenges.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"nonce": nonce})

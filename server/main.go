@@ -110,6 +110,7 @@ func main() {
 
 	go statsLoop(ctx, *configDir)
 	go expiredPasswordJanitor(ctx, wgDev)
+	go profileChallengeJanitor(ctx)
 	go botLoop(botTokenValue, *adminID, wgDev)
 
 	go func() {
