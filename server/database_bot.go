@@ -54,6 +54,15 @@ type PasswordEntry struct {
 	IsDeactivated bool     `json:"is_deactivated,omitempty"`
 }
 
+func clonePasswordEntry(entry *PasswordEntry) *PasswordEntry {
+	if entry == nil {
+		return nil
+	}
+	cloned := *entry
+	cloned.DeviceIDs = append([]string(nil), entry.DeviceIDs...)
+	return &cloned
+}
+
 func passwordEntryHasDevice(entry *PasswordEntry, deviceID string) bool {
 	if entry == nil {
 		return false
@@ -281,12 +290,21 @@ var (
 )
 
 type Database struct {
-	MainPassword string                    `json:"-"`
-	AdminID      string                    `json:"-"`
-	BotToken     string                    `json:"-"`
-	Passwords    map[string]*PasswordEntry `json:"passwords"`
-	Devices      map[string]*ClientDevice  `json:"devices"`
+	MainPassword   string                         `json:"-"`
+	AdminID        string                         `json:"-"`
+	BotToken       string                         `json:"-"`
+	Passwords      map[string]*PasswordEntry      `json:"passwords"`
+	Devices        map[string]*ClientDevice       `json:"devices"`
+	CreateRequests map[string]CreateRequestRecord `json:"create_requests,omitempty"`
 }
+
+type CreateRequestRecord struct {
+	RequestHash  string `json:"request_hash"`
+	PasswordHash string `json:"password_hash"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
+const createRequestRetention = 7 * 24 * time.Hour
 
 var (
 	db          *Database
@@ -537,8 +555,9 @@ func reloadDB(wgDev *device.Device) error {
 	oldDB := db
 
 	newDB := &Database{
-		Passwords: make(map[string]*PasswordEntry),
-		Devices:   make(map[string]*ClientDevice),
+		Passwords:      make(map[string]*PasswordEntry),
+		Devices:        make(map[string]*ClientDevice),
+		CreateRequests: make(map[string]CreateRequestRecord),
 	}
 	if err := json.Unmarshal(data, newDB); err != nil {
 		return fmt.Errorf("parse db json: %w", err)
@@ -598,6 +617,12 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	}
 	if db.Devices == nil {
 		db.Devices = make(map[string]*ClientDevice)
+	}
+	if db.CreateRequests == nil {
+		db.CreateRequests = make(map[string]CreateRequestRecord)
+	}
+	if db.CreateRequests == nil {
+		db.CreateRequests = make(map[string]CreateRequestRecord)
 	}
 	db.MainPassword = mainPass
 	db.AdminID = adminID

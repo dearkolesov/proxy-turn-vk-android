@@ -21,8 +21,8 @@ var (
 	activeConns          int32
 	totalConns           int64
 	natType              string = "Инициализация..."
-	serverStartTime      time.Time
-	lastWGStats          = make(map[string]struct{ rx, tx int64 })
+	serverStartTime             = time.Now()
+	lastWGStats                 = make(map[string]struct{ rx, tx int64 })
 )
 
 // rawDeviceTraffic — per-device счётчики трафика raw-режима, копятся в
@@ -184,7 +184,6 @@ func updateTrafficFromWG() {
 }
 
 func statsLoop(ctx context.Context, configDir string) {
-	serverStartTime = time.Now()
 	statsFile := filepath.Join(configDir, "server.log")
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()

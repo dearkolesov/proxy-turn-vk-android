@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -187,5 +189,117 @@ func TestAuthenticateProfileUnbindAllAllowsEmptyDeviceID(t *testing.T) {
 	gotPassword, gotDeviceID, valid := authenticateProfileRequest(request, "unbind")
 	if !valid || gotPassword != password || gotDeviceID != "" {
 		t.Fatalf("authenticateProfileRequest() = (%q, %q, %t)", gotPassword, gotDeviceID, valid)
+	}
+}
+
+func TestProfileUnbindAllRemovesDevicesAndPersists(t *testing.T) {
+	previousDB := db
+	previousDBFile := dbFile
+	previousKeyStore := serverWrapKeys
+	previousWGDevice := globalWgDev
+	defer func() {
+		db = previousDB
+		dbFile = previousDBFile
+		serverWrapKeys = previousKeyStore
+		globalWgDev = previousWGDevice
+		resetProfileChallengeStateForTest()
+	}()
+	resetProfileChallengeStateForTest()
+
+	password := "profile-test-password"
+	devices := []string{"device-a", "device-b"}
+	db = &Database{
+		Passwords: map[string]*PasswordEntry{
+			password: {DeviceID: "multi", DeviceIDs: append([]string(nil), devices...), MaxDevices: 4},
+		},
+		Devices: map[string]*ClientDevice{
+			devices[0]: {DeviceID: devices[0]},
+			devices[1]: {DeviceID: devices[1]},
+		},
+	}
+	dbFile = filepath.Join(t.TempDir(), "passwords.json")
+	serverWrapKeys = newWrapKeyStore()
+	if err := serverWrapKeys.SetPasswords("", []string{password}); err != nil {
+		t.Fatalf("SetPasswords() error = %v", err)
+	}
+	globalWgDev = nil
+
+	nonce := "unbind-all-route-test-nonce"
+	profileChallenges.Lock()
+	profileChallenges.items[nonce] = time.Now().Add(time.Minute)
+	profileChallenges.Unlock()
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("unbind\n\n" + nonce))
+	form := url.Values{
+		"device_id": {""},
+		"nonce":     {nonce},
+		"key_id":    {profileKeyID(password)},
+		"proof":     {hex.EncodeToString(mac.Sum(nil))},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/profile/unbind", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handleAPIProfileUnbind(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unbind-all status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if len(db.Devices) != 0 || len(db.Passwords[password].DeviceIDs) != 0 || db.Passwords[password].DeviceID != "" {
+		t.Fatalf("unbind-all left bindings behind: devices=%d ids=%v legacy=%q", len(db.Devices), db.Passwords[password].DeviceIDs, db.Passwords[password].DeviceID)
+	}
+	if _, err := os.Stat(dbFile); err != nil {
+		t.Fatalf("unbind-all did not persist the database: %v", err)
+	}
+}
+
+func TestProfileUnbindRollsBackWhenPersistenceFails(t *testing.T) {
+	previousDB := db
+	previousDBFile := dbFile
+	previousKeyStore := serverWrapKeys
+	previousWGDevice := globalWgDev
+	defer func() {
+		db = previousDB
+		dbFile = previousDBFile
+		serverWrapKeys = previousKeyStore
+		globalWgDev = previousWGDevice
+		resetProfileChallengeStateForTest()
+	}()
+	resetProfileChallengeStateForTest()
+
+	password := "profile-test-password"
+	deviceID := "device-a"
+	db = &Database{
+		Passwords: map[string]*PasswordEntry{password: {DeviceID: deviceID, DeviceIDs: []string{deviceID}, MaxDevices: 1}},
+		Devices:   map[string]*ClientDevice{deviceID: {DeviceID: deviceID}},
+	}
+	dbFile = filepath.Join(t.TempDir(), "missing", "passwords.json")
+	serverWrapKeys = newWrapKeyStore()
+	if err := serverWrapKeys.SetPasswords("", []string{password}); err != nil {
+		t.Fatalf("SetPasswords() error = %v", err)
+	}
+	globalWgDev = nil
+
+	nonce := "unbind-rollback-test-nonce"
+	profileChallenges.Lock()
+	profileChallenges.items[nonce] = time.Now().Add(time.Minute)
+	profileChallenges.Unlock()
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("unbind\n" + deviceID + "\n" + nonce))
+	form := url.Values{
+		"device_id": {deviceID},
+		"nonce":     {nonce},
+		"key_id":    {profileKeyID(password)},
+		"proof":     {hex.EncodeToString(mac.Sum(nil))},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/profile/unbind", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handleAPIProfileUnbind(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("unbind status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	if len(db.Devices) != 1 || !passwordEntryHasDevice(db.Passwords[password], deviceID) {
+		t.Fatalf("failed unbind changed state: devices=%d entry=%+v", len(db.Devices), db.Passwords[password])
 	}
 }

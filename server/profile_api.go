@@ -29,6 +29,7 @@ func unbindDevices(entry *PasswordEntry, targetDeviceID string) {
 		entry.DeviceIDs = nil
 	} else {
 		if entry.DeviceID == targetDeviceID {
+			removeDeviceFromSystem(targetDeviceID)
 			entry.DeviceID = ""
 		}
 		newIDs := []string{}
@@ -307,9 +308,27 @@ func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-	disconnectCredentialDeviceConnections(password, deviceID)
+	entryBefore := clonePasswordEntry(entry)
+	deviceIDsBefore := entryDeviceIDs(entry)
+	removedDevices := make(map[string]*ClientDevice)
+	for _, id := range deviceIDsBefore {
+		if deviceID == "" || id == deviceID {
+			if dev, exists := db.Devices[id]; exists {
+				removedDevices[id] = dev
+			}
+		}
+	}
 	unbindDevices(entry, deviceID)
-	saveDB()
+	if err := saveDB(); err != nil {
+		*entry = *entryBefore
+		for id, dev := range removedDevices {
+			db.Devices[id] = dev
+			upsertPeerInWG(globalWgDev, dev)
+		}
+		http.Error(w, `{"error":"Failed to persist device unbind"}`, http.StatusInternalServerError)
+		return
+	}
+	disconnectCredentialDeviceConnections(password, deviceID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"success":true}`))
