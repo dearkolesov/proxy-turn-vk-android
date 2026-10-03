@@ -8,6 +8,7 @@
     selected: null,
     editing: null,
     createKey: "",
+    qrObjectURL: "",
     toastTimer: 0,
   };
   const byId = (id) => document.getElementById(id);
@@ -355,10 +356,16 @@
     }
     const headers = editing ? {} : { "Idempotency-Key": state.createKey };
     try {
-      await request(path, { method: "POST", body, headers });
+      const saved = await request(path, { method: "POST", body, headers });
       editor.close();
       toast(editing ? "Изменения сохранены" : "Ключ создан");
       await refresh();
+      if (!editing) {
+        const created =
+          state.entries.find((entry) => entry.password === saved.password) ||
+          saved;
+        openDetails(created);
+      }
     } catch (error) {
       setFormError(
         "editor-error",
@@ -371,8 +378,32 @@
 
   function openDetails(entry) {
     state.selected = entry;
+    byId("quick-link-panel").hidden = true;
+    byId("qr-panel").hidden = true;
+    byId("qr-image").hidden = true;
+    setFormError("qr-error", "");
     renderDetails();
     details.showModal();
+  }
+
+  function quickLink(entry) {
+    const configuredPorts = (entry.ports || "56000,56001,9000")
+      .split(",")
+      .map((value) => Number.parseInt(value.trim(), 10));
+    const dtlsPort = configuredPorts[0] > 0 ? configuredPorts[0] : 56000;
+    const appPort = configuredPorts[2] > 0 ? configuredPorts[2] : 9000;
+    const host = window.location.hostname;
+    const peerHost =
+      host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    const params = new URLSearchParams({
+      name: entry.label || entry.password,
+      peer: `${peerHost}:${dtlsPort}`,
+      hashes: entry.vk_hash || "",
+      workers: "18",
+      port: String(appPort),
+      pass: entry.password,
+    });
+    return `qwdtt://config?${params.toString()}`;
   }
 
   function renderDetails() {
@@ -393,6 +424,7 @@
     byId("detail-toggle").textContent = entry.is_deactivated
       ? "Включить"
       : "Отключить";
+    byId("quick-link-value").textContent = quickLink(entry);
     setFormError("detail-error", "");
     const list = byId("device-list");
     list.replaceChildren();
@@ -501,6 +533,103 @@
     }
   }
 
+  async function copyQuickLink() {
+    if (!state.selected) return;
+    try {
+      await navigator.clipboard.writeText(quickLink(state.selected));
+      toast("Быстрая ссылка скопирована");
+    } catch {
+      toast("Не удалось скопировать ссылку", true);
+    }
+  }
+
+  async function showQRCode() {
+    if (!state.selected) return;
+    const panel = byId("qr-panel");
+    const image = byId("qr-image");
+    const download = byId("download-qr");
+    panel.hidden = false;
+    image.hidden = true;
+    download.hidden = true;
+    byId("qr-loading").hidden = false;
+    setFormError("qr-error", "");
+    try {
+      const response = await fetch("/admin/qrcode", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${state.token}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ payload: quickLink(state.selected) }),
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try {
+          const data = await response.json();
+          message = data.error || message;
+        } catch {
+          // Keep the HTTP status as the fallback message.
+        }
+        throw new Error(message);
+      }
+      const imageURL = URL.createObjectURL(await response.blob());
+      if (state.qrObjectURL) URL.revokeObjectURL(state.qrObjectURL);
+      state.qrObjectURL = imageURL;
+      image.src = imageURL;
+      image.hidden = false;
+      download.href = imageURL;
+      download.hidden = false;
+    } catch (error) {
+      setFormError("qr-error", error.message || "Не удалось создать QR-код.");
+    } finally {
+      byId("qr-loading").hidden = true;
+    }
+  }
+
+  async function showQRCode() {
+    if (!state.selected) return;
+    const panel = byId("qr-panel");
+    const image = byId("qr-image");
+    const download = byId("download-qr");
+    panel.hidden = false;
+    image.hidden = true;
+    byId("qr-loading").hidden = false;
+    setFormError("qr-error", "");
+    try {
+      const response = await fetch("/admin/qrcode", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${state.token}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ payload: quickLink(state.selected) }),
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try {
+          const data = await response.json();
+          message = data.error || message;
+        } catch {
+          /* Keep the HTTP status as the error. */
+        }
+        throw new Error(message);
+      }
+      const imageURL = URL.createObjectURL(await response.blob());
+      if (state.qrObjectURL) URL.revokeObjectURL(state.qrObjectURL);
+      state.qrObjectURL = imageURL;
+      image.src = imageURL;
+      image.hidden = false;
+      download.href = imageURL;
+      download.hidden = false;
+    } catch (error) {
+      setFormError("qr-error", error.message || "Не удалось создать QR-код.");
+    } finally {
+      byId("qr-loading").hidden = true;
+    }
+  }
+
   byId("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = event.submitter;
@@ -546,6 +675,24 @@
       ),
     );
   byId("copy-password").addEventListener("click", copyPassword);
+  byId("show-link-button").addEventListener("click", () => {
+    byId("quick-link-panel").hidden = !byId("quick-link-panel").hidden;
+    byId("qr-panel").hidden = true;
+  });
+  byId("copy-quick-link").addEventListener("click", copyQuickLink);
+  byId("show-qr-button").addEventListener("click", () => {
+    byId("quick-link-panel").hidden = true;
+    showQRCode();
+  });
+  byId("show-link-button").addEventListener("click", () => {
+    byId("quick-link-panel").hidden = !byId("quick-link-panel").hidden;
+    byId("qr-panel").hidden = true;
+  });
+  byId("copy-quick-link").addEventListener("click", copyQuickLink);
+  byId("show-qr-button").addEventListener("click", () => {
+    byId("quick-link-panel").hidden = true;
+    showQRCode();
+  });
   byId("detail-edit").addEventListener("click", () => {
     const entry = state.selected;
     details.close();
@@ -562,6 +709,18 @@
     if (state.selected) deleteEntry(state.selected);
   });
   byId("unbind-all-button").addEventListener("click", unbindAll);
+  details.addEventListener("close", () => {
+    byId("qr-image").removeAttribute("src");
+    byId("download-qr").removeAttribute("href");
+    if (state.qrObjectURL) URL.revokeObjectURL(state.qrObjectURL);
+    state.qrObjectURL = "";
+  });
+  details.addEventListener("close", () => {
+    byId("qr-image").removeAttribute("src");
+    byId("download-qr").removeAttribute("href");
+    if (state.qrObjectURL) URL.revokeObjectURL(state.qrObjectURL);
+    state.qrObjectURL = "";
+  });
   byId("search-input").addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.target.value = "";

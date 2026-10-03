@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/skip2/go-qrcode"
 )
 
 type createPasswordFingerprint struct {
@@ -720,6 +722,36 @@ func handleAdminUnbindDevice(w http.ResponseWriter, r *http.Request) {
 	writeAdminJSON(w, http.StatusOK, view)
 }
 
+func handleAdminQRCode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !adminAuthorized(r) {
+		writeAdminError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid form data")
+		return
+	}
+	payload := r.FormValue("payload")
+	if payload == "" || len(payload) > 3000 {
+		writeAdminError(w, http.StatusBadRequest, "payload is required and must be at most 3000 bytes")
+		return
+	}
+	png, err := qrcode.Encode(payload, qrcode.Medium, 600)
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "payload cannot be encoded as a QR code")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
+}
+
 func registerAdminAPIRoutes(mux *http.ServeMux) {
 	registerAdminUI(mux)
 	mux.HandleFunc("/healthz", handleHealthz)
@@ -742,4 +774,5 @@ func registerAdminAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/passwords/delete", handleAdminDeletePassword)
 	mux.HandleFunc("/admin/passwords/update", handleAdminUpdatePassword)
 	mux.HandleFunc("/admin/passwords/unbind-device", handleAdminUnbindDevice)
+	mux.HandleFunc("/admin/qrcode", handleAdminQRCode)
 }

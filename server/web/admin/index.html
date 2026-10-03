@@ -241,9 +241,18 @@
             /></label>
           </div>
           <label id="ports-field" class="field"
-            ><span>Порты <em>необязательно</em></span
-            ><input id="field-ports" name="ports" placeholder="dtls,wg,tun"
-          /></label>
+            ><span>Порты для ссылки <em>необязательно</em></span
+            ><input
+              id="field-ports"
+              name="ports"
+              inputmode="numeric"
+              placeholder="56000,56001,9000"
+            /><small
+              >Это не переключатель режимов. Три числа через запятую
+              используются только в ссылках: DTLS сервера, WireGuard и порт
+              приложения. Оставьте пустым для 56000, 56001 и 9000.</small
+            ></label
+          >
           <p id="editor-error" class="form-error" role="alert"></p>
         </div>
         <footer class="dialog-footer">
@@ -287,6 +296,52 @@
               Копировать
             </button>
           </div>
+          <div class="share-actions">
+            <button
+              id="show-link-button"
+              class="button button-primary"
+              type="button"
+            >
+              Быстрая ссылка qWDTT
+            </button>
+            <button
+              id="show-qr-button"
+              class="button button-quiet"
+              type="button"
+            >
+              QR-код
+            </button>
+          </div>
+          <section id="quick-link-panel" class="share-panel" hidden>
+            <div class="share-panel-heading">
+              <div>
+                <strong>Импорт в qWDTT</strong
+                ><span>Откройте ссылку на устройстве с приложением.</span>
+              </div>
+              <button
+                id="copy-quick-link"
+                class="button button-quiet"
+                type="button"
+              >
+                Копировать
+              </button>
+            </div>
+            <code id="quick-link-value" class="quick-link-value"></code>
+          </section>
+          <section id="qr-panel" class="qr-panel" hidden>
+            <div id="qr-loading" class="qr-loading" hidden>
+              <span class="spinner"></span>Создание QR-кода…
+            </div>
+            <img id="qr-image" alt="QR-код быстрой ссылки qWDTT" hidden />
+            <p id="qr-error" class="form-error" role="alert"></p>
+            <a
+              id="download-qr"
+              class="button button-quiet"
+              download="qwdtt-profile.png"
+              hidden
+              >Скачать PNG</a
+            >
+          </section>
           <div class="detail-stats">
             <div><span>Статус</span><strong id="detail-status">—</strong></div>
             <div>

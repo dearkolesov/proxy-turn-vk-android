@@ -74,6 +74,8 @@ func postAdminForm(path, key string, form url.Values) *httptest.ResponseRecorder
 		handleAdminDeletePassword(response, request)
 	case "/admin/passwords/unbind-device":
 		handleAdminUnbindDevice(response, request)
+	case "/admin/qrcode":
+		handleAdminQRCode(response, request)
 	default:
 		panic("unsupported test path: " + path)
 	}
@@ -259,6 +261,23 @@ func TestAdminUnbindDeviceAllowsEmptyIDToUnbindAll(t *testing.T) {
 	entry := db.Passwords["test-password"]
 	if len(db.Devices) != 0 || len(entry.DeviceIDs) != 0 || entry.DeviceID != "" {
 		t.Fatalf("unbind-all left state behind: devices=%d ids=%v legacy=%q", len(db.Devices), entry.DeviceIDs, entry.DeviceID)
+	}
+}
+
+func TestAdminQRCodeReturnsPNG(t *testing.T) {
+	cleanup := setupAdminCreateTest(t)
+	defer cleanup()
+	response := postAdminForm("/admin/qrcode", "", url.Values{
+		"payload": {"qwdtt://config?name=Test&peer=example.org:56000&hashes=vk-hash&workers=18&port=9000&pass=local-test"},
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("QR status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("QR Content-Type = %q, want image/png", got)
+	}
+	if len(response.Body.Bytes()) < 8 || string(response.Body.Bytes()[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatal("QR response is not a PNG image")
 	}
 }
 

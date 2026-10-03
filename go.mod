@@ -6,6 +6,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/pion/dtls/v3 v3.1.5
 	github.com/pion/transport/v4 v4.0.2
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.51.0
 	golang.org/x/sys v0.44.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
