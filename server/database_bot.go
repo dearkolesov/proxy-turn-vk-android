@@ -298,9 +298,8 @@ var (
 var serverWrapKeys = newWrapKeyStore()
 
 const (
-	passChars             = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-	generatedPasswordLen  = 16
-	maxGeneratedPasswords = 10
+	passChars            = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+	generatedPasswordLen = 16
 )
 
 func generatePassword() (string, error) {
@@ -1165,11 +1164,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
 					saveDB()
 				}
-				if len(db.Passwords) >= maxGeneratedPasswords {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
-					continue
-				}
 				newPass := ""
 				for i := 0; i < 10; i++ {
 					candidate, generateErr := generatePassword()
@@ -1260,11 +1254,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				dbMutex.Lock()
 				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
 					saveDB()
-				}
-				if len(db.Passwords) >= maxGeneratedPasswords {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
-					continue
 				}
 				dbMutex.Unlock()
 				waitingForDays = true
@@ -1381,7 +1370,7 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	if len(db.Passwords) == 0 {
 		txt += "_Нет сгенерированных паролей._\n"
 	} else {
-		txt += fmt.Sprintf("_Активно: %d/%d_\n\n", len(db.Passwords), maxGeneratedPasswords)
+		txt += fmt.Sprintf("_Ключей: %d_\n\n", len(db.Passwords))
 		index := 0
 		for p, entry := range db.Passwords {
 			index++

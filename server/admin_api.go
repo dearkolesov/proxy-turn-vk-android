@@ -227,11 +227,6 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 	if cleanupExpiredPasswordsLocked(globalWgDev) > 0 {
 		saveDB()
 	}
-	if len(db.Passwords) >= maxGeneratedPasswords {
-		dbMutex.Unlock()
-		writeAdminError(w, http.StatusConflict, fmt.Sprintf("password limit reached (max %d)", maxGeneratedPasswords))
-		return
-	}
 
 	newPass := ""
 	for i := 0; i < 10; i++ {
