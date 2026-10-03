@@ -361,6 +361,7 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 		dbMutex.Lock()
 		isMainPass := password != "" && password == db.MainPassword
 		entry, isGenPass := db.Passwords[password]
+		entryBefore := clonePasswordEntry(entry)
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
 		if valid && isGenPass && entry.IsDeactivated {
 			dbMutex.Unlock()
@@ -381,28 +382,53 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 			}
 			return
 		}
-		if isGenPass {
-			saveDB()
-		}
-
 		dev, exists := db.Devices[deviceID]
+		deviceBefore := cloneClientDevice(dev)
+		deviceChanged := !exists
 		if !exists {
-			dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP(), RawIP: getNextRawIP()}
-			setDeviceOwner(dev, password)
-			dev.RawOwnerID = wrapKeyID(password)
-			db.Devices[deviceID] = dev
-			saveDB()
-		} else {
-			changed := false
-			setDeviceOwner(dev, password)
-			dev.RawOwnerID = wrapKeyID(password)
-			changed = true
-			if dev.RawIP == "" {
-				dev.RawIP = getNextRawIP()
-				changed = true
+			dev = &ClientDevice{DeviceID: deviceID}
+		}
+		ownerIDBefore := dev.OwnerID
+		rawOwnerIDBefore := dev.RawOwnerID
+		setDeviceOwner(dev, password)
+		dev.RawOwnerID = wrapKeyID(password)
+		deviceChanged = deviceChanged || ownerIDBefore != dev.OwnerID || rawOwnerIDBefore != dev.RawOwnerID
+		if dev.IP == "" {
+			dev.IP = getNextIP()
+			deviceChanged = true
+		}
+		if dev.RawIP == "" {
+			dev.RawIP = getNextRawIP()
+			deviceChanged = true
+		}
+		if dev.IP == "" || dev.RawIP == "" {
+			if entryBefore != nil {
+				*entry = *entryBefore
 			}
-			if changed {
-				saveDB()
+			if deviceBefore != nil {
+				db.Devices[deviceID] = deviceBefore
+			} else {
+				delete(db.Devices, deviceID)
+			}
+			dbMutex.Unlock()
+			clientConn.Write([]byte("NOCONF"))
+			return
+		}
+		db.Devices[deviceID] = dev
+		bindingChanged := isGenPass && (entry.DeviceID != entryBefore.DeviceID || len(entry.DeviceIDs) != len(entryBefore.DeviceIDs))
+		if bindingChanged || deviceChanged {
+			if err := saveDB(); err != nil {
+				if entryBefore != nil {
+					*entry = *entryBefore
+				}
+				if deviceBefore != nil {
+					db.Devices[deviceID] = deviceBefore
+				} else {
+					delete(db.Devices, deviceID)
+				}
+				dbMutex.Unlock()
+				clientConn.Write([]byte("NOCONF"))
+				return
 			}
 		}
 		assignedIP = dev.RawIP
@@ -439,14 +465,28 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 		}
 		dev, exists := db.Devices[deviceID]
 		if exists {
+			deviceBefore := cloneClientDevice(dev)
+			ownerIDBefore := dev.OwnerID
+			rawOwnerIDBefore := dev.RawOwnerID
 			setDeviceOwner(dev, password)
 			dev.RawOwnerID = wrapKeyID(password)
-		}
-		if exists && dev.RawIP == "" {
-			dev.RawIP = getNextRawIP()
-			saveDB()
-		}
-		if exists {
+			changed := ownerIDBefore != dev.OwnerID || rawOwnerIDBefore != dev.RawOwnerID
+			if dev.RawIP == "" {
+				dev.RawIP = getNextRawIP()
+				changed = true
+			}
+			if dev.RawIP == "" {
+				*dev = *deviceBefore
+				dbMutex.Unlock()
+				return
+			}
+			if changed {
+				if saveDB() != nil {
+					*dev = *deviceBefore
+					dbMutex.Unlock()
+					return
+				}
+			}
 			assignedIP = dev.RawIP
 		}
 		dbMutex.Unlock()
@@ -464,17 +504,8 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 	log.Printf("[RAW] Сессия %s зарегистрирована (ip=%s, getConf=%v)", deviceID, assignedIP, isGetConf)
 	defer log.Printf("[RAW] Сессия %s (ip=%s) завершена", deviceID, assignedIP)
 
-	activeDevicesMu.Lock()
-	activeDevices[deviceID]++
-	activeDevicesMu.Unlock()
-	defer func() {
-		activeDevicesMu.Lock()
-		activeDevices[deviceID]--
-		if activeDevices[deviceID] <= 0 {
-			delete(activeDevices, deviceID)
-		}
-		activeDevicesMu.Unlock()
-	}()
+	stopTrackingDevice := trackActiveDevice(deviceID)
+	defer stopTrackingDevice()
 
 	b := getBuf()
 	defer putBuf(b)

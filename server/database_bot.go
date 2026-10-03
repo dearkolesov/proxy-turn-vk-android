@@ -41,6 +41,14 @@ type ClientDevice struct {
 	RawOwnerID string `json:"raw_owner_id,omitempty"`
 }
 
+func cloneClientDevice(device *ClientDevice) *ClientDevice {
+	if device == nil {
+		return nil
+	}
+	cloned := *device
+	return &cloned
+}
+
 type PasswordEntry struct {
 	Label         string   `json:"label,omitempty"` // понятное имя в боте
 	DeviceID      string   `json:"device_id"`       // Для обратной совместимости, если нужно
@@ -307,10 +315,12 @@ type CreateRequestRecord struct {
 const createRequestRetention = 7 * 24 * time.Hour
 
 var (
-	db          *Database
-	dbMutex     sync.Mutex
-	dbFile      string
-	globalWgDev *device.Device
+	db            *Database
+	dbMutex       sharedStateMutex
+	clusterStore  *postgresStore
+	clusterNodeID string
+	dbFile        string
+	globalWgDev   *device.Device
 )
 
 var serverWrapKeys = newWrapKeyStore()
@@ -546,6 +556,9 @@ func refreshWrapKeysFromDBLocked() error {
 func reloadDB(wgDev *device.Device) error {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
+	if clusterStore != nil {
+		return nil
+	}
 
 	data, err := os.ReadFile(dbFile)
 	if err != nil {
@@ -592,7 +605,7 @@ func reloadDB(wgDev *device.Device) error {
 	return nil
 }
 
-func initDB(dir, mainPass, adminID, botToken string) {
+func initDB(dir, mainPass, adminID, botToken, databaseURL, nodeID string) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		log.Fatalf("[DB] Не удалось создать каталог: %v", err)
 	}
@@ -624,7 +637,31 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	db.MainPassword = mainPass
 	db.AdminID = adminID
 	db.BotToken = botToken
-	if err := saveDB(); err != nil {
+	if databaseURL != "" {
+		if nodeID == "" {
+			hostname, hostnameErr := os.Hostname()
+			if hostnameErr != nil {
+				log.Fatalf("[DB] Не удалось определить node ID: %v", hostnameErr)
+			}
+			nodeID = hostname
+		}
+		store, storeErr := newPostgresStore(databaseURL, nodeID)
+		if storeErr != nil {
+			log.Fatalf("[DB] PostgreSQL: %v", storeErr)
+		}
+		clusterStore = store
+		loaded, revision, loadErr := store.Initialize(db)
+		if loadErr != nil {
+			store.Close()
+			log.Fatalf("[DB] Инициализация общей базы: %v", loadErr)
+		}
+		loaded.MainPassword = mainPass
+		loaded.AdminID = adminID
+		loaded.BotToken = botToken
+		db = loaded
+		clusterNodeID = nodeID
+		dbMutex.Configure(store, revision)
+	} else if err := saveDB(); err != nil {
 		log.Fatalf("[DB] Не удалось сохранить базу: %v", err)
 	}
 	if err := refreshWrapKeysFromDBLocked(); err != nil {
@@ -637,6 +674,9 @@ func saveDB() error {
 	if err != nil {
 		log.Printf("[DB] Ошибка сериализации: %v", err)
 		return err
+	}
+	if clusterStore != nil {
+		return dbMutex.Persist(data)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(dbFile), ".passwords-*.tmp")
 	if err != nil {
@@ -1380,6 +1420,9 @@ func syncPersistedPeersToWG(wgDev *device.Device) {
 	defer dbMutex.Unlock()
 	count := 0
 	for _, dev := range db.Devices {
+		if !sharedDeviceHasActiveOwner(db, dev.DeviceID, dev) {
+			continue
+		}
 		upsertPeerInWG(wgDev, dev)
 		count++
 	}

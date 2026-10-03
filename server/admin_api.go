@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -144,23 +145,27 @@ type adminPasswordView struct {
 }
 
 func toAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView {
+	view := buildAdminPasswordView(pass, entry)
+	active, err := countActiveDevices(view.DeviceIDs)
+	if err != nil {
+		log.Printf("[ADMIN API] Failed to read active-device count: %v", err)
+		active = 0
+	}
+	view.ActiveDevices = active
+	return view
+}
+
+func buildAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView {
 	deviceIDs := entry.DeviceIDs
 	if len(deviceIDs) == 0 && entry.DeviceID != "" {
 		deviceIDs = []string{entry.DeviceID}
+	} else {
+		deviceIDs = append([]string(nil), deviceIDs...)
 	}
 	maxDevs := entry.MaxDevices
 	if maxDevs <= 0 {
 		maxDevs = 1
 	}
-
-	activeDevicesMu.Lock()
-	active := 0
-	for _, id := range deviceIDs {
-		if activeDevices[id] > 0 {
-			active++
-		}
-	}
-	activeDevicesMu.Unlock()
 
 	return adminPasswordView{
 		Password:      pass,
@@ -173,8 +178,19 @@ func toAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView {
 		IsDeactivated: entry.IsDeactivated,
 		DownBytes:     entry.DownBytes,
 		UpBytes:       entry.UpBytes,
-		ActiveDevices: active,
+		ActiveDevices: 0,
 	}
+}
+
+func toAdminPasswordViewWithActiveSet(pass string, entry *PasswordEntry, activeSet map[string]struct{}) adminPasswordView {
+	view := buildAdminPasswordView(pass, entry)
+	view.ActiveDevices = 0
+	for _, id := range view.DeviceIDs {
+		if _, active := activeSet[id]; active {
+			view.ActiveDevices++
+		}
+	}
+	return view
 }
 
 // GET /admin/passwords — список всех сгенерированных паролей
@@ -198,13 +214,29 @@ func handleAdminListPasswords(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	views := make([]adminPasswordView, 0, len(db.Passwords))
+	allDeviceIDs := make([]string, 0, len(db.Devices))
 	for pass, entry := range db.Passwords {
 		if entry == nil {
 			continue
 		}
-		views = append(views, toAdminPasswordView(pass, entry))
+		deviceIDs := entryDeviceIDs(entry)
+		allDeviceIDs = append(allDeviceIDs, deviceIDs...)
+		views = append(views, toAdminPasswordViewWithActiveSet(pass, entry, nil))
 	}
 	dbMutex.Unlock()
+	activeSet, err := activeDeviceSet(allDeviceIDs)
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "active-device status unavailable")
+		return
+	}
+	for i := range views {
+		views[i].ActiveDevices = 0
+		for _, deviceID := range views[i].DeviceIDs {
+			if _, active := activeSet[deviceID]; active {
+				views[i].ActiveDevices++
+			}
+		}
+	}
 
 	writeAdminJSON(w, http.StatusOK, map[string]interface{}{"passwords": views})
 }

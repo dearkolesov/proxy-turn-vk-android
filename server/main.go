@@ -38,6 +38,9 @@ func main() {
 	botToken := flag.String("bot-token", "", "Telegram Bot Token")
 	botTokenFile := flag.String("bot-token-file", "", "файл Telegram Bot Token")
 	dnsFlag := flag.String("dns", "8.8.8.8", "DNS серверы для клиентов")
+	databaseURL := flag.String("database-url", os.Getenv("WDTT_DATABASE_URL"), "PostgreSQL DSN для общего состояния нескольких нод; пусто = локальный JSON")
+	nodeID := flag.String("node-id", os.Getenv("WDTT_NODE_ID"), "Уникальный ID этой ноды (по умолчанию hostname)")
+	botNodeID := flag.String("bot-node-id", os.Getenv("WDTT_BOT_NODE_ID"), "ID единственной ноды для Telegram polling в cluster mode; пусто = бот выключен")
 	flag.Parse()
 	dns = *dnsFlag
 	mainPasswordValue, err := loadOptionalSecret(*mainPass, *mainPassFile)
@@ -85,7 +88,10 @@ func main() {
 		}
 	}()
 
-	initDB(*configDir, mainPasswordValue, *adminID, botTokenValue)
+	initDB(*configDir, mainPasswordValue, *adminID, botTokenValue, *databaseURL, *nodeID)
+	if clusterStore != nil {
+		defer clusterStore.Close()
+	}
 
 	keys, err := loadOrGenerateKeys(*configDir)
 	if err != nil {
@@ -111,7 +117,15 @@ func main() {
 	go statsLoop(ctx, *configDir)
 	go expiredPasswordJanitor(ctx, wgDev)
 	go profileChallengeJanitor(ctx)
-	go botLoop(botTokenValue, *adminID, wgDev)
+	if clusterStore == nil || (botTokenValue != "" && *botNodeID != "" && *botNodeID == clusterNodeID) {
+		go botLoop(botTokenValue, *adminID, wgDev)
+	} else if botTokenValue != "" && *botNodeID == "" {
+		log.Println("[BOT] Telegram bot disabled in cluster mode; set -bot-node-id on exactly one node to enable polling")
+	}
+	if clusterStore != nil {
+		go clusterStateSyncLoop(ctx)
+		go clusterPresenceLoop(ctx)
+	}
 
 	go func() {
 		mux := http.NewServeMux()

@@ -157,6 +157,7 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		isMainPass := password != "" && password == db.MainPassword
 		entry, isGenPass := db.Passwords[password]
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
+		entryBefore := clonePasswordEntry(entry)
 		entryDeviceIDBefore := ""
 		entryDeviceIDsBefore := 0
 		if isGenPass && entry != nil {
@@ -182,8 +183,11 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 
 			dev, exists := db.Devices[deviceID]
 			deviceChanged := !exists
+			var deviceBefore *ClientDevice
 			if !exists {
 				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
+			} else {
+				deviceBefore = cloneClientDevice(dev)
 			}
 			ownerIDBefore := dev.OwnerID
 			setDeviceOwner(dev, password)
@@ -211,12 +215,32 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 				}
 			}
 			if dev != nil {
-				upsertPeerInWG(wgDev, dev)
 				if bindingChanged || deviceChanged {
-					saveDB()
+					if err := saveDB(); err != nil {
+						if entryBefore != nil {
+							*entry = *entryBefore
+						}
+						if deviceBefore != nil {
+							db.Devices[deviceID] = deviceBefore
+						} else {
+							delete(db.Devices, deviceID)
+						}
+						dbMutex.Unlock()
+						clientConn.Write([]byte("NOCONF"))
+						return
+					}
 				}
+				upsertPeerInWG(wgDev, dev)
 				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
 			} else {
+				if entryBefore != nil {
+					*entry = *entryBefore
+				}
+				if deviceBefore != nil {
+					db.Devices[deviceID] = deviceBefore
+				} else {
+					delete(db.Devices, deviceID)
+				}
 				clientConn.Write([]byte("NOCONF"))
 				dbMutex.Unlock()
 				return
@@ -318,20 +342,8 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	}
 	atomic.AddInt64(&totalBytesFromClient, int64(len(firstPacket)))
 
-	// Трекинг онлайн-статуса
-	if connDeviceID != "" {
-		activeDevicesMu.Lock()
-		activeDevices[connDeviceID]++
-		activeDevicesMu.Unlock()
-		defer func() {
-			activeDevicesMu.Lock()
-			activeDevices[connDeviceID]--
-			if activeDevices[connDeviceID] <= 0 {
-				delete(activeDevices, connDeviceID)
-			}
-			activeDevicesMu.Unlock()
-		}()
-	}
+	stopTrackingDevice := trackActiveDevice(connDeviceID)
+	defer stopTrackingDevice()
 
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()

@@ -100,6 +100,9 @@ func startUserspaceWG(keys *wgKeys, wgPort int) (*device.Device, error) {
 	}
 
 	for _, d := range db.Devices {
+		if !sharedDeviceHasActiveOwner(db, d.DeviceID, d) {
+			continue
+		}
 		pubHex, _ := b64ToHex(d.PubKey)
 		if pubHex != "" {
 			dev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", pubHex, d.IP))
