@@ -1,17 +1,20 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +32,7 @@ func unbindDevices(entry *PasswordEntry, targetDeviceID string) {
 		entry.DeviceIDs = nil
 	} else {
 		if entry.DeviceID == targetDeviceID {
+			removeDeviceFromSystem(targetDeviceID)
 			entry.DeviceID = ""
 		}
 		newIDs := []string{}
@@ -62,56 +66,158 @@ func removeDeviceFromSystem(devID string) {
 
 var profileChallenges = struct {
 	sync.Mutex
-	items    map[string]time.Time
-	attempts map[string]adminAuthAttempt
-}{items: make(map[string]time.Time), attempts: make(map[string]adminAuthAttempt)}
+	items   map[string]time.Time
+	buckets map[string]profileChallengeBucket
+}{items: make(map[string]time.Time), buckets: make(map[string]profileChallengeBucket)}
+
+var (
+	profileChallengeRejectedTotal int64
+	profileChallengeErrorTotal    int64
+)
+
+const (
+	profileChallengeRatePerSecond = 250
+	profileChallengeBurst         = 1000
+	profileChallengeMaxEntries    = 32768
+	profileChallengeMaxBuckets    = 65536
+	profileChallengeTTL           = time.Minute
+	profileChallengeBucketTTL     = 2 * time.Minute
+)
+
+type profileChallengeBucket struct {
+	tokens    float64
+	updatedAt time.Time
+}
+
+func allowProfileChallenge(host string, now time.Time) bool {
+	if host == "" {
+		host = "unknown"
+	}
+
+	profileChallenges.Lock()
+	defer profileChallenges.Unlock()
+
+	bucket, exists := profileChallenges.buckets[host]
+	if !exists {
+		if len(profileChallenges.buckets) >= profileChallengeMaxBuckets {
+			for staleHost, staleBucket := range profileChallenges.buckets {
+				if now.Sub(staleBucket.updatedAt) > profileChallengeBucketTTL {
+					delete(profileChallenges.buckets, staleHost)
+				}
+			}
+			if len(profileChallenges.buckets) >= profileChallengeMaxBuckets {
+				return false
+			}
+		}
+		bucket = profileChallengeBucket{tokens: profileChallengeBurst, updatedAt: now}
+	} else {
+		elapsed := now.Sub(bucket.updatedAt).Seconds()
+		if elapsed > 0 {
+			bucket.tokens = min(float64(profileChallengeBurst), bucket.tokens+elapsed*profileChallengeRatePerSecond)
+		}
+		bucket.updatedAt = now
+	}
+
+	if bucket.tokens < 1 {
+		profileChallenges.buckets[host] = bucket
+		return false
+	}
+	bucket.tokens--
+	profileChallenges.buckets[host] = bucket
+	return true
+}
+
+func cleanupProfileChallengeState(now time.Time) {
+	profileChallenges.Lock()
+	for nonce, expires := range profileChallenges.items {
+		if !expires.After(now) {
+			delete(profileChallenges.items, nonce)
+		}
+	}
+	for host, bucket := range profileChallenges.buckets {
+		if now.Sub(bucket.updatedAt) > profileChallengeBucketTTL {
+			delete(profileChallenges.buckets, host)
+		}
+	}
+	profileChallenges.Unlock()
+	if clusterStore != nil {
+		if err := clusterStore.CleanupProfileChallenges(now); err != nil {
+			log.Printf("[API] Challenge cleanup failed: %v", err)
+		}
+	}
+}
+
+func profileChallengeJanitor(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			cleanupProfileChallengeState(now)
+		}
+	}
+}
 
 func handleAPIProfileChallenge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	now := time.Now()
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	profileChallenges.Lock()
-	for address, attempt := range profileChallenges.attempts {
-		if now.Sub(attempt.windowStart) > time.Minute {
-			delete(profileChallenges.attempts, address)
+	if host == "" {
+		host = "unknown"
+	}
+	now := time.Now()
+	allowed := false
+	if clusterStore != nil {
+		var limitErr error
+		allowed, limitErr = clusterStore.AllowProfileChallenge(host, now, profileChallengeBurst, profileChallengeRatePerSecond, profileChallengeMaxBuckets, profileChallengeBucketTTL)
+		if limitErr != nil {
+			atomic.AddInt64(&profileChallengeErrorTotal, 1)
+			http.Error(w, `{"error":"Challenge service unavailable"}`, http.StatusServiceUnavailable)
+			return
 		}
+	} else {
+		allowed = allowProfileChallenge(host, now)
 	}
-	attempt := profileChallenges.attempts[host]
-	if attempt.windowStart.IsZero() || now.Sub(attempt.windowStart) > time.Minute {
-		attempt = adminAuthAttempt{windowStart: now}
-	}
-	if attempt.count >= 30 {
-		profileChallenges.Unlock()
-		http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
-		return
-	}
-	attempt.count++
-	profileChallenges.attempts[host] = attempt
-	for value, expires := range profileChallenges.items {
-		if !expires.After(now) {
-			delete(profileChallenges.items, value)
-		}
-	}
-	if len(profileChallenges.items) >= 8192 {
-		profileChallenges.Unlock()
+	if !allowed {
+		atomic.AddInt64(&profileChallengeRejectedTotal, 1)
 		http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
 		return
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		profileChallenges.Unlock()
 		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
 		return
 	}
 	nonce := base64.RawURLEncoding.EncodeToString(b)
-	profileChallenges.items[nonce] = now.Add(time.Minute)
-	profileChallenges.Unlock()
+	if clusterStore != nil {
+		if err := clusterStore.AddProfileChallenge(nonce, now.Add(profileChallengeTTL), profileChallengeMaxEntries); err != nil {
+			if errors.Is(err, errClusterChallengeCapacity) {
+				atomic.AddInt64(&profileChallengeRejectedTotal, 1)
+				http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
+			} else {
+				atomic.AddInt64(&profileChallengeErrorTotal, 1)
+				http.Error(w, `{"error":"Challenge service unavailable"}`, http.StatusServiceUnavailable)
+			}
+			return
+		}
+	} else {
+		profileChallenges.Lock()
+		if len(profileChallenges.items) >= profileChallengeMaxEntries {
+			profileChallenges.Unlock()
+			atomic.AddInt64(&profileChallengeRejectedTotal, 1)
+			http.Error(w, `{"error":"Too many requests"}`, http.StatusTooManyRequests)
+			return
+		}
+		profileChallenges.items[nonce] = now.Add(profileChallengeTTL)
+		profileChallenges.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"nonce": nonce})
 }
@@ -126,40 +232,62 @@ func authenticateProfileRequest(r *http.Request, action string) (string, string,
 	nonce := r.FormValue("nonce")
 	keyID := r.FormValue("key_id")
 	proof, err := hex.DecodeString(r.FormValue("proof"))
-	if deviceID == "" || nonce == "" || keyID == "" || err != nil || len(proof) != sha256.Size {
+	if (deviceID == "" && action != "unbind") || nonce == "" || keyID == "" || err != nil || len(proof) != sha256.Size {
 		return "", "", false
 	}
-	now := time.Now()
-	profileChallenges.Lock()
-	expires, exists := profileChallenges.items[nonce]
-	profileChallenges.Unlock()
-	if !exists || !expires.After(now) {
-		return "", "", false
-	}
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-	for password, entry := range db.Passwords {
-		candidateKeyID := profileKeyID(password)
-		if subtle.ConstantTimeCompare([]byte(candidateKeyID), []byte(keyID)) != 1 || isPasswordExpired(entry) || entry.IsDeactivated {
-			continue
+	if clusterStore == nil {
+		now := time.Now()
+		profileChallenges.Lock()
+		expires, exists := profileChallenges.items[nonce]
+		profileChallenges.Unlock()
+		if !exists || !expires.After(now) {
+			return "", "", false
 		}
-		mac := hmac.New(sha256.New, []byte(password))
-		mac.Write([]byte(action + "\n" + deviceID + "\n" + nonce))
-		if hmac.Equal(proof, mac.Sum(nil)) {
-			profileChallenges.Lock()
-			currentExpiry, stillExists := profileChallenges.items[nonce]
-			if stillExists && currentExpiry.After(time.Now()) {
-				delete(profileChallenges.items, nonce)
-			}
-			profileChallenges.Unlock()
-			if !stillExists || !currentExpiry.After(time.Now()) {
-				return "", "", false
-			}
-			return password, deviceID, true
-		}
+	}
+	password, indexed := serverWrapKeys.ProfilePassword(keyID)
+	if !indexed && clusterStore != nil {
+		dbMutex.Lock()
+		dbMutex.Unlock()
+		password, indexed = serverWrapKeys.ProfilePassword(keyID)
+	}
+	if !indexed {
 		return "", "", false
 	}
-	return "", "", false
+
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte(action + "\n" + deviceID + "\n" + nonce))
+	if !hmac.Equal(proof, mac.Sum(nil)) {
+		return "", "", false
+	}
+	if clusterStore != nil {
+		consumed, err := clusterStore.ConsumeProfileChallenge(nonce, time.Now())
+		if err != nil || !consumed {
+			return "", "", false
+		}
+	} else {
+		profileChallenges.Lock()
+		currentExpiry, stillExists := profileChallenges.items[nonce]
+		if stillExists && currentExpiry.After(time.Now()) {
+			delete(profileChallenges.items, nonce)
+		}
+		profileChallenges.Unlock()
+		if !stillExists || !currentExpiry.After(time.Now()) {
+			return "", "", false
+		}
+	}
+	return password, deviceID, true
+}
+
+func profileAuthFailureStatus() int {
+	if clusterStore == nil {
+		return http.StatusUnauthorized
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := clusterStore.Ping(ctx); err != nil {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusUnauthorized
 }
 
 func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
@@ -169,7 +297,7 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	password, deviceID, valid := authenticateProfileRequest(r, "status")
 	if !valid {
-		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+		http.Error(w, `{"error":"Unauthorized"}`, profileAuthFailureStatus())
 		return
 	}
 	dbMutex.Lock()
@@ -190,28 +318,13 @@ func handleAPIProfileStatus(w http.ResponseWriter, r *http.Request) {
 		boundDevices = 1
 	}
 
-	isCurrentBound := false
-
-	activeCount := 0
-	activeDevicesMu.Lock()
-	if len(entry.DeviceIDs) == 0 && entry.DeviceID != "" {
-		if entry.DeviceID == deviceID {
-			isCurrentBound = true
-		}
-		if count := activeDevices[entry.DeviceID]; count > 0 {
-			activeCount = 1
-		}
-	} else {
-		for _, id := range entry.DeviceIDs {
-			if id == deviceID {
-				isCurrentBound = true
-			}
-			if count := activeDevices[id]; count > 0 {
-				activeCount++
-			}
-		}
+	deviceIDs := entryDeviceIDs(entry)
+	isCurrentBound := passwordEntryHasDevice(entry, deviceID)
+	activeCount, err := countActiveDevices(deviceIDs)
+	if err != nil {
+		http.Error(w, `{"error":"Status service unavailable"}`, http.StatusServiceUnavailable)
+		return
 	}
-	activeDevicesMu.Unlock()
 
 	resp := map[string]interface{}{
 		"max_devices":      maxDevs,
@@ -232,7 +345,7 @@ func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
 	}
 	password, deviceID, valid := authenticateProfileRequest(r, "unbind")
 	if !valid {
-		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+		http.Error(w, `{"error":"Unauthorized"}`, profileAuthFailureStatus())
 		return
 	}
 	dbMutex.Lock()
@@ -242,9 +355,27 @@ func handleAPIProfileUnbind(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-	disconnectCredentialDeviceConnections(password, deviceID)
+	entryBefore := clonePasswordEntry(entry)
+	deviceIDsBefore := entryDeviceIDs(entry)
+	removedDevices := make(map[string]*ClientDevice)
+	for _, id := range deviceIDsBefore {
+		if deviceID == "" || id == deviceID {
+			if dev, exists := db.Devices[id]; exists {
+				removedDevices[id] = dev
+			}
+		}
+	}
 	unbindDevices(entry, deviceID)
-	saveDB()
+	if err := saveDB(); err != nil {
+		*entry = *entryBefore
+		for id, dev := range removedDevices {
+			db.Devices[id] = dev
+			upsertPeerInWG(globalWgDev, dev)
+		}
+		http.Error(w, `{"error":"Failed to persist device unbind"}`, http.StatusInternalServerError)
+		return
+	}
+	disconnectCredentialDeviceConnections(password, deviceID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"success":true}`))

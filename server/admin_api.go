@@ -5,13 +5,43 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/skip2/go-qrcode"
 )
+
+type createPasswordFingerprint struct {
+	VkHash     string `json:"vk_hash"`
+	Days       int    `json:"days"`
+	MaxDevices int    `json:"max_devices"`
+	Ports      string `json:"ports"`
+	Label      string `json:"label"`
+}
+
+func fingerprintCreatePassword(request createPasswordFingerprint) string {
+	data, _ := json.Marshal(request)
+	hash := sha256.Sum256(data)
+	return fmt.Sprintf("%x", hash[:])
+}
+
+func passwordFingerprint(password string) string {
+	hash := sha256.Sum256([]byte(password))
+	return fmt.Sprintf("%x", hash[:])
+}
+
+func cleanupCreateRequestsLocked(now time.Time) {
+	for key, record := range db.CreateRequests {
+		if now.Sub(time.Unix(record.CreatedAt, 0)) > createRequestRetention {
+			delete(db.CreateRequests, key)
+		}
+	}
+}
 
 var adminTokenHash [32]byte
 var adminTokenReady bool
@@ -98,7 +128,7 @@ func writeAdminError(w http.ResponseWriter, status int, msg string) {
 
 func setAdminCORSHeaders(w http.ResponseWriter, methods string) {
 	w.Header().Set("Access-Control-Allow-Methods", methods+", OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 	w.Header().Set("Cache-Control", "no-store")
 }
 
@@ -117,23 +147,27 @@ type adminPasswordView struct {
 }
 
 func toAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView {
+	view := buildAdminPasswordView(pass, entry)
+	active, err := countActiveDevices(view.DeviceIDs)
+	if err != nil {
+		log.Printf("[ADMIN API] Failed to read active-device count: %v", err)
+		active = 0
+	}
+	view.ActiveDevices = active
+	return view
+}
+
+func buildAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView {
 	deviceIDs := entry.DeviceIDs
 	if len(deviceIDs) == 0 && entry.DeviceID != "" {
 		deviceIDs = []string{entry.DeviceID}
+	} else {
+		deviceIDs = append([]string(nil), deviceIDs...)
 	}
 	maxDevs := entry.MaxDevices
 	if maxDevs <= 0 {
 		maxDevs = 1
 	}
-
-	activeDevicesMu.Lock()
-	active := 0
-	for _, id := range deviceIDs {
-		if activeDevices[id] > 0 {
-			active++
-		}
-	}
-	activeDevicesMu.Unlock()
 
 	return adminPasswordView{
 		Password:      pass,
@@ -146,8 +180,19 @@ func toAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView {
 		IsDeactivated: entry.IsDeactivated,
 		DownBytes:     entry.DownBytes,
 		UpBytes:       entry.UpBytes,
-		ActiveDevices: active,
+		ActiveDevices: 0,
 	}
+}
+
+func toAdminPasswordViewWithActiveSet(pass string, entry *PasswordEntry, activeSet map[string]struct{}) adminPasswordView {
+	view := buildAdminPasswordView(pass, entry)
+	view.ActiveDevices = 0
+	for _, id := range view.DeviceIDs {
+		if _, active := activeSet[id]; active {
+			view.ActiveDevices++
+		}
+	}
+	return view
 }
 
 // GET /admin/passwords — список всех сгенерированных паролей
@@ -163,18 +208,37 @@ func handleAdminListPasswords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dbMutex.Lock()
-	if globalWgDev != nil {
-		cleanupExpiredPasswordsLocked(globalWgDev)
+	if globalWgDev != nil && cleanupExpiredPasswordsLocked(globalWgDev) > 0 {
+		if err := saveDB(); err != nil {
+			dbMutex.Unlock()
+			writeAdminError(w, http.StatusInternalServerError, "failed to persist expired-password cleanup")
+			return
+		}
 	}
 	views := make([]adminPasswordView, 0, len(db.Passwords))
+	allDeviceIDs := make([]string, 0, len(db.Devices))
 	for pass, entry := range db.Passwords {
 		if entry == nil {
 			continue
 		}
-		views = append(views, toAdminPasswordView(pass, entry))
+		deviceIDs := entryDeviceIDs(entry)
+		allDeviceIDs = append(allDeviceIDs, deviceIDs...)
+		views = append(views, toAdminPasswordViewWithActiveSet(pass, entry, nil))
 	}
-	saveDB()
 	dbMutex.Unlock()
+	activeSet, err := activeDeviceSet(allDeviceIDs)
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "active-device status unavailable")
+		return
+	}
+	for i := range views {
+		views[i].ActiveDevices = 0
+		for _, deviceID := range views[i].DeviceIDs {
+			if _, active := activeSet[deviceID]; active {
+				views[i].ActiveDevices++
+			}
+		}
+	}
 
 	writeAdminJSON(w, http.StatusOK, map[string]interface{}{"passwords": views})
 }
@@ -222,15 +286,62 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	ports := r.FormValue("ports")
 	label := r.FormValue("label")
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(idempotencyKey) > 200 {
+		writeAdminError(w, http.StatusBadRequest, "Idempotency-Key must be at most 200 bytes")
+		return
+	}
+	requestHash := fingerprintCreatePassword(createPasswordFingerprint{
+		VkHash:     vkHash,
+		Days:       days,
+		MaxDevices: maxDevices,
+		Ports:      ports,
+		Label:      label,
+	})
+	idempotencyHash := ""
+	if idempotencyKey != "" {
+		hash := sha256.Sum256([]byte(idempotencyKey))
+		idempotencyHash = fmt.Sprintf("%x", hash[:])
+	}
 
 	dbMutex.Lock()
 	if cleanupExpiredPasswordsLocked(globalWgDev) > 0 {
-		saveDB()
+		if err := saveDB(); err != nil {
+			dbMutex.Unlock()
+			writeAdminError(w, http.StatusInternalServerError, "failed to persist expired-password cleanup")
+			return
+		}
 	}
-	if len(db.Passwords) >= maxGeneratedPasswords {
-		dbMutex.Unlock()
-		writeAdminError(w, http.StatusConflict, fmt.Sprintf("password limit reached (max %d)", maxGeneratedPasswords))
-		return
+	if db.CreateRequests == nil {
+		db.CreateRequests = make(map[string]CreateRequestRecord)
+	}
+	if idempotencyHash != "" {
+		cleanupCreateRequestsLocked(time.Now())
+		if record, exists := db.CreateRequests[idempotencyHash]; exists {
+			if record.RequestHash != requestHash {
+				dbMutex.Unlock()
+				writeAdminError(w, http.StatusConflict, "Idempotency-Key was already used with a different request")
+				return
+			}
+			password := ""
+			var entry *PasswordEntry
+			for candidate, candidateEntry := range db.Passwords {
+				if passwordFingerprint(candidate) == record.PasswordHash {
+					password = candidate
+					entry = candidateEntry
+					break
+				}
+			}
+			if password == "" || entry == nil {
+				dbMutex.Unlock()
+				writeAdminError(w, http.StatusConflict, "Idempotency-Key belongs to an expired or deleted password")
+				return
+			}
+			view := toAdminPasswordView(password, entry)
+			dbMutex.Unlock()
+			writeAdminJSON(w, http.StatusOK, view)
+			return
+		}
 	}
 
 	newPass := ""
@@ -266,7 +377,21 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 		Ports:      ports,
 	}
 	db.Passwords[newPass] = entry
-	saveDB()
+	if idempotencyHash != "" {
+		db.CreateRequests[idempotencyHash] = CreateRequestRecord{
+			RequestHash:  requestHash,
+			PasswordHash: passwordFingerprint(newPass),
+			CreatedAt:    time.Now().Unix(),
+		}
+	}
+	if err := saveDB(); err != nil {
+		delete(db.Passwords, newPass)
+		delete(db.CreateRequests, idempotencyHash)
+		serverWrapKeys.RemovePassword(newPass)
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist new password")
+		return
+	}
 	view := toAdminPasswordView(newPass, entry)
 	dbMutex.Unlock()
 
@@ -296,6 +421,28 @@ func handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "invalid form data")
 		return
 	}
+	if r.Form.Has("vk_hash") && r.FormValue("vk_hash") == "" {
+		writeAdminError(w, http.StatusBadRequest, "vk_hash cannot be empty")
+		return
+	}
+	maxDevices := 0
+	if r.Form.Has("max_devices") {
+		parsed, err := strconv.Atoi(r.FormValue("max_devices"))
+		if err != nil || parsed < 1 {
+			writeAdminError(w, http.StatusBadRequest, "max_devices must be a positive number")
+			return
+		}
+		maxDevices = parsed
+	}
+	days := 0
+	if r.Form.Has("days") {
+		parsed, err := strconv.Atoi(r.FormValue("days"))
+		if err != nil || parsed < 1 || parsed > 365 {
+			writeAdminError(w, http.StatusBadRequest, "days must be between 1 and 365")
+			return
+		}
+		days = parsed
+	}
 
 	pass := r.FormValue("password")
 	if pass == "" {
@@ -311,38 +458,26 @@ func handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	entryBefore := clonePasswordEntry(entry)
 	if r.Form.Has("label") {
 		entry.Label = r.FormValue("label")
 	}
 	if r.Form.Has("vk_hash") {
-		vkHash := r.FormValue("vk_hash")
-		if vkHash == "" {
-			dbMutex.Unlock()
-			writeAdminError(w, http.StatusBadRequest, "vk_hash cannot be empty")
-			return
-		}
-		entry.VkHash = vkHash
+		entry.VkHash = r.FormValue("vk_hash")
 	}
 	if r.Form.Has("max_devices") {
-		parsed, err := strconv.Atoi(r.FormValue("max_devices"))
-		if err != nil || parsed < 1 {
-			dbMutex.Unlock()
-			writeAdminError(w, http.StatusBadRequest, "max_devices must be a positive number")
-			return
-		}
-		entry.MaxDevices = parsed
+		entry.MaxDevices = maxDevices
 	}
 	if r.Form.Has("days") {
-		parsed, err := strconv.Atoi(r.FormValue("days"))
-		if err != nil || parsed < 1 || parsed > 365 {
-			dbMutex.Unlock()
-			writeAdminError(w, http.StatusBadRequest, "days must be between 1 and 365")
-			return
-		}
-		entry.ExpiresAt = time.Now().Add(time.Duration(parsed) * 24 * time.Hour).Unix()
+		entry.ExpiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
 	}
 
-	saveDB()
+	if err := saveDB(); err != nil {
+		*entry = *entryBefore
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist password changes")
+		return
+	}
 	view := toAdminPasswordView(pass, entry)
 	dbMutex.Unlock()
 
@@ -378,11 +513,17 @@ func handleAdminDeactivatePassword(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusNotFound, "password not found")
 		return
 	}
+	wasDeactivated := entry.IsDeactivated
 	entry.IsDeactivated = true
+	if err := saveDB(); err != nil {
+		entry.IsDeactivated = wasDeactivated
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist password deactivation")
+		return
+	}
 	disconnectCredentialConnections(pass)
 	serverWrapKeys.RemovePassword(pass)
 	disconnectPasswordDevicesLocked(entry)
-	saveDB()
 	view := toAdminPasswordView(pass, entry)
 	dbMutex.Unlock()
 
@@ -418,13 +559,22 @@ func handleAdminActivatePassword(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusNotFound, "password not found")
 		return
 	}
+	wasDeactivated := entry.IsDeactivated
 	if err := serverWrapKeys.AddPassword(pass); err != nil {
 		dbMutex.Unlock()
 		writeAdminError(w, http.StatusInternalServerError, "failed to activate password")
 		return
 	}
 	entry.IsDeactivated = false
-	saveDB()
+	if err := saveDB(); err != nil {
+		entry.IsDeactivated = wasDeactivated
+		if wasDeactivated {
+			serverWrapKeys.RemovePassword(pass)
+		}
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist password activation")
+		return
+	}
 	view := toAdminPasswordView(pass, entry)
 	dbMutex.Unlock()
 
@@ -460,24 +610,29 @@ func handleAdminDeletePassword(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusNotFound, "password not found")
 		return
 	}
-	deviceIDs := entry.DeviceIDs
-	if len(deviceIDs) == 0 && entry.DeviceID != "" {
-		deviceIDs = []string{entry.DeviceID}
-	}
+	deviceIDs := entryDeviceIDs(entry)
+	removedDevices := make(map[string]*ClientDevice, len(deviceIDs))
 	for _, id := range deviceIDs {
 		if dev, devExists := db.Devices[id]; devExists {
-			if globalWgDev != nil {
-				if pubHex, err := b64ToHex(dev.PubKey); err == nil {
-					globalWgDev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pubHex))
-				}
-			}
+			removedDevices[id] = dev
 			delete(db.Devices, id)
 		}
 	}
 	delete(db.Passwords, pass)
+	if err := saveDB(); err != nil {
+		db.Passwords[pass] = entry
+		for id, dev := range removedDevices {
+			db.Devices[id] = dev
+		}
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist password deletion")
+		return
+	}
 	disconnectCredentialConnections(pass)
 	serverWrapKeys.RemovePassword(pass)
-	saveDB()
+	for _, dev := range removedDevices {
+		removePeerFromWG(globalWgDev, dev)
+	}
 	dbMutex.Unlock()
 
 	writeAdminJSON(w, http.StatusOK, map[string]bool{"success": true})
@@ -531,10 +686,6 @@ func handleAdminUnbindDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deviceID := r.FormValue("device_id")
-	if deviceID == "" {
-		writeAdminError(w, http.StatusBadRequest, "device_id is required")
-		return
-	}
 
 	dbMutex.Lock()
 	entry, exists := db.Passwords[pass]
@@ -543,16 +694,68 @@ func handleAdminUnbindDevice(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusNotFound, "password not found")
 		return
 	}
-	disconnectCredentialDeviceConnections(pass, deviceID)
+	entryBefore := clonePasswordEntry(entry)
+	deviceIDsBefore := entryDeviceIDs(entry)
+	removedDevices := make(map[string]*ClientDevice)
+	for _, id := range deviceIDsBefore {
+		if deviceID == "" || id == deviceID {
+			if dev, exists := db.Devices[id]; exists {
+				removedDevices[id] = dev
+			}
+		}
+	}
 	unbindDevices(entry, deviceID)
-	saveDB()
+	if err := saveDB(); err != nil {
+		*entry = *entryBefore
+		for id, dev := range removedDevices {
+			db.Devices[id] = dev
+			upsertPeerInWG(globalWgDev, dev)
+		}
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist device unbind")
+		return
+	}
+	disconnectCredentialDeviceConnections(pass, deviceID)
 	view := toAdminPasswordView(pass, entry)
 	dbMutex.Unlock()
 
 	writeAdminJSON(w, http.StatusOK, view)
 }
 
+func handleAdminQRCode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !adminAuthorized(r) {
+		writeAdminError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid form data")
+		return
+	}
+	payload := r.FormValue("payload")
+	if payload == "" || len(payload) > 3000 {
+		writeAdminError(w, http.StatusBadRequest, "payload is required and must be at most 3000 bytes")
+		return
+	}
+	png, err := qrcode.Encode(payload, qrcode.Medium, 600)
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "payload cannot be encoded as a QR code")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
+}
+
 func registerAdminAPIRoutes(mux *http.ServeMux) {
+	registerAdminUI(mux)
+	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/metrics", handlePrometheusMetrics)
 	mux.HandleFunc("/admin/passwords", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -571,4 +774,5 @@ func registerAdminAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/passwords/delete", handleAdminDeletePassword)
 	mux.HandleFunc("/admin/passwords/update", handleAdminUpdatePassword)
 	mux.HandleFunc("/admin/passwords/unbind-device", handleAdminUnbindDevice)
+	mux.HandleFunc("/admin/qrcode", handleAdminQRCode)
 }

@@ -157,6 +157,13 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		isMainPass := password != "" && password == db.MainPassword
 		entry, isGenPass := db.Passwords[password]
 		valid := isMainPass || (isGenPass && !isPasswordExpired(entry))
+		entryBefore := clonePasswordEntry(entry)
+		entryDeviceIDBefore := ""
+		entryDeviceIDsBefore := 0
+		if isGenPass && entry != nil {
+			entryDeviceIDBefore = entry.DeviceID
+			entryDeviceIDsBefore = len(entry.DeviceIDs)
+		}
 
 		if valid && isGenPass && entry.IsDeactivated {
 			clientConn.Write([]byte("DENIED:deactivated"))
@@ -170,17 +177,21 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			dbMutex.Unlock()
 			return
 		} else if valid {
+			bindingChanged := isGenPass && (entry.DeviceID != entryDeviceIDBefore || len(entry.DeviceIDs) != entryDeviceIDsBefore)
 			connDeviceID = deviceID
 			authenticatedPassword = password
 
-			// Сохраняем БД, так как canConnectAndBind мог внести привязку нового устройства
-			saveDB()
-
 			dev, exists := db.Devices[deviceID]
+			deviceChanged := !exists
+			var deviceBefore *ClientDevice
 			if !exists {
 				dev = &ClientDevice{DeviceID: deviceID, IP: getNextIP()}
+			} else {
+				deviceBefore = cloneClientDevice(dev)
 			}
+			ownerIDBefore := dev.OwnerID
 			setDeviceOwner(dev, password)
+			deviceChanged = deviceChanged || ownerIDBefore != dev.OwnerID
 			// Устройство могло быть создано раньше только Raw-путём
 			// (GETCONF_RAW, см. handleConnRaw) — там PrivKey/PubKey никогда
 			// не генерируются, только IP/RawIP. Без этой проверки такое
@@ -197,16 +208,39 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 					dev.PrivKey = privB64
 					dev.PubKey = pubB64
 					db.Devices[deviceID] = dev
-					saveDB()
+					deviceChanged = true
 					log.Printf("[WG] Сгенерированы ключи для устройства %s (IP: %s)", deviceID, dev.IP)
 				} else {
 					dev = nil
 				}
 			}
 			if dev != nil {
+				if bindingChanged || deviceChanged {
+					if err := saveDB(); err != nil {
+						if entryBefore != nil {
+							*entry = *entryBefore
+						}
+						if deviceBefore != nil {
+							db.Devices[deviceID] = deviceBefore
+						} else {
+							delete(db.Devices, deviceID)
+						}
+						dbMutex.Unlock()
+						clientConn.Write([]byte("NOCONF"))
+						return
+					}
+				}
 				upsertPeerInWG(wgDev, dev)
 				clientConn.Write([]byte(buildClientConfig(keys.serverPublic, dev.PrivKey, dev.IP, clientPort)))
 			} else {
+				if entryBefore != nil {
+					*entry = *entryBefore
+				}
+				if deviceBefore != nil {
+					db.Devices[deviceID] = deviceBefore
+				} else {
+					delete(db.Devices, deviceID)
+				}
 				clientConn.Write([]byte("NOCONF"))
 				dbMutex.Unlock()
 				return
@@ -260,7 +294,6 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			clientConn.Write([]byte("DENIED:device_mismatch"))
 			return
 		}
-		saveDB()
 		dbMutex.Unlock()
 
 		connDeviceID = deviceID
@@ -309,20 +342,8 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 	}
 	atomic.AddInt64(&totalBytesFromClient, int64(len(firstPacket)))
 
-	// Трекинг онлайн-статуса
-	if connDeviceID != "" {
-		activeDevicesMu.Lock()
-		activeDevices[connDeviceID]++
-		activeDevicesMu.Unlock()
-		defer func() {
-			activeDevicesMu.Lock()
-			activeDevices[connDeviceID]--
-			if activeDevices[connDeviceID] <= 0 {
-				delete(activeDevices, connDeviceID)
-			}
-			activeDevicesMu.Unlock()
-		}()
-	}
+	stopTrackingDevice := trackActiveDevice(connDeviceID)
+	defer stopTrackingDevice()
 
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()

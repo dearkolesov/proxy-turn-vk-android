@@ -21,8 +21,8 @@ var (
 	activeConns          int32
 	totalConns           int64
 	natType              string = "Инициализация..."
-	serverStartTime      time.Time
-	lastWGStats          = make(map[string]struct{ rx, tx int64 })
+	serverStartTime             = time.Now()
+	lastWGStats                 = make(map[string]struct{ rx, tx int64 })
 )
 
 // rawDeviceTraffic — per-device счётчики трафика raw-режима, копятся в
@@ -111,6 +111,19 @@ func updateTrafficFromWG() {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 
+	type peerDevice struct {
+		id     string
+		device *ClientDevice
+	}
+	devicesByPublicKey := make(map[string]peerDevice, len(db.Devices))
+	for devID, dev := range db.Devices {
+		pub, decodeErr := b64ToHex(dev.PubKey)
+		if decodeErr == nil {
+			devicesByPublicKey[pub] = peerDevice{id: devID, device: dev}
+		}
+	}
+	seenPeers := make(map[string]struct{}, len(lastWGStats))
+
 	var currentPub string
 	var rx, tx int64
 
@@ -118,6 +131,7 @@ func updateTrafficFromWG() {
 		if pub == "" {
 			return
 		}
+		seenPeers[pub] = struct{}{}
 		last := lastWGStats[pub]
 		deltaRx := currentRx - last.rx
 		deltaTx := currentTx - last.tx
@@ -131,23 +145,13 @@ func updateTrafficFromWG() {
 			return
 		}
 
-		var targetDevID string
-		for devID, dev := range db.Devices {
-			h, _ := b64ToHex(dev.PubKey)
-			if h == pub {
-				targetDevID = devID
-				dev.UpBytes += deltaRx
-				dev.DownBytes += deltaTx
-				break
-			}
-		}
-
-		if targetDevID == "" {
+		target, exists := devicesByPublicKey[pub]
+		if !exists {
 			return
 		}
-
-		dev := db.Devices[targetDevID]
-		entry := generatedOwnerEntryLocked(dev, targetDevID)
+		target.device.UpBytes += deltaRx
+		target.device.DownBytes += deltaTx
+		entry := generatedOwnerEntryLocked(target.device, target.id)
 		if entry != nil {
 			entry.UpBytes += deltaRx
 			entry.DownBytes += deltaTx
@@ -172,10 +176,14 @@ func updateTrafficFromWG() {
 		}
 	}
 	processPeer(currentPub, rx, tx)
+	for pub := range lastWGStats {
+		if _, exists := seenPeers[pub]; !exists {
+			delete(lastWGStats, pub)
+		}
+	}
 }
 
 func statsLoop(ctx context.Context, configDir string) {
-	serverStartTime = time.Now()
 	statsFile := filepath.Join(configDir, "server.log")
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()

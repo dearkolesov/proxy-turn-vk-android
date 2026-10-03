@@ -41,6 +41,14 @@ type ClientDevice struct {
 	RawOwnerID string `json:"raw_owner_id,omitempty"`
 }
 
+func cloneClientDevice(device *ClientDevice) *ClientDevice {
+	if device == nil {
+		return nil
+	}
+	cloned := *device
+	return &cloned
+}
+
 type PasswordEntry struct {
 	Label         string   `json:"label,omitempty"` // понятное имя в боте
 	DeviceID      string   `json:"device_id"`       // Для обратной совместимости, если нужно
@@ -52,6 +60,15 @@ type PasswordEntry struct {
 	VkHash        string   `json:"vk_hash,omitempty"`
 	Ports         string   `json:"ports,omitempty"` // "dtls,wg,tun"
 	IsDeactivated bool     `json:"is_deactivated,omitempty"`
+}
+
+func clonePasswordEntry(entry *PasswordEntry) *PasswordEntry {
+	if entry == nil {
+		return nil
+	}
+	cloned := *entry
+	cloned.DeviceIDs = append([]string(nil), entry.DeviceIDs...)
+	return &cloned
 }
 
 func passwordEntryHasDevice(entry *PasswordEntry, deviceID string) bool {
@@ -281,26 +298,36 @@ var (
 )
 
 type Database struct {
-	MainPassword string                    `json:"-"`
-	AdminID      string                    `json:"-"`
-	BotToken     string                    `json:"-"`
-	Passwords    map[string]*PasswordEntry `json:"passwords"`
-	Devices      map[string]*ClientDevice  `json:"devices"`
+	MainPassword   string                         `json:"-"`
+	AdminID        string                         `json:"-"`
+	BotToken       string                         `json:"-"`
+	Passwords      map[string]*PasswordEntry      `json:"passwords"`
+	Devices        map[string]*ClientDevice       `json:"devices"`
+	CreateRequests map[string]CreateRequestRecord `json:"create_requests,omitempty"`
 }
 
+type CreateRequestRecord struct {
+	RequestHash  string `json:"request_hash"`
+	PasswordHash string `json:"password_hash"`
+	CreatedAt    int64  `json:"created_at"`
+}
+
+const createRequestRetention = 7 * 24 * time.Hour
+
 var (
-	db          *Database
-	dbMutex     sync.Mutex
-	dbFile      string
-	globalWgDev *device.Device
+	db            *Database
+	dbMutex       sharedStateMutex
+	clusterStore  *postgresStore
+	clusterNodeID string
+	dbFile        string
+	globalWgDev   *device.Device
 )
 
 var serverWrapKeys = newWrapKeyStore()
 
 const (
-	passChars             = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-	generatedPasswordLen  = 16
-	maxGeneratedPasswords = 10
+	passChars            = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+	generatedPasswordLen = 16
 )
 
 func generatePassword() (string, error) {
@@ -357,12 +384,13 @@ type wrapKeyEntry struct {
 }
 
 type wrapKeyStore struct {
-	mu      sync.RWMutex
-	entries []wrapKeyEntry
+	mu               sync.RWMutex
+	entries          []wrapKeyEntry
+	profilePasswords map[string]string
 }
 
 func newWrapKeyStore() *wrapKeyStore {
-	return &wrapKeyStore{}
+	return &wrapKeyStore{profilePasswords: make(map[string]string)}
 }
 
 func deriveWrapKey(password string) ([]byte, error) {
@@ -396,6 +424,7 @@ func zeroBytes(b []byte) {
 func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) error {
 	next := make([]wrapKeyEntry, 0, len(generated)+1)
 	seen := make(map[string]struct{}, len(generated)+1)
+	nextProfilePasswords := make(map[string]string, len(generated))
 
 	if mainPassword != "" {
 		key, err := deriveWrapKey(mainPassword)
@@ -424,11 +453,13 @@ func (s *wrapKeyStore) SetPasswords(mainPassword string, generated []string) err
 		}
 		next = append(next, wrapKeyEntry{id: id, key: key})
 		seen[id] = struct{}{}
+		nextProfilePasswords[profileKeyID(password)] = password
 	}
 
 	s.mu.Lock()
 	old := s.entries
 	s.entries = next
+	s.profilePasswords = nextProfilePasswords
 	s.mu.Unlock()
 	for _, entry := range old {
 		evictAEAD(entry.key)
@@ -446,13 +477,18 @@ func (s *wrapKeyStore) AddPassword(password string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.profilePasswords == nil {
+		s.profilePasswords = make(map[string]string)
+	}
 	for _, entry := range s.entries {
 		if entry.id == id {
 			zeroBytes(key)
+			s.profilePasswords[profileKeyID(password)] = password
 			return nil
 		}
 	}
 	s.entries = append(s.entries, wrapKeyEntry{id: id, key: key})
+	s.profilePasswords[profileKeyID(password)] = password
 	return nil
 }
 
@@ -461,6 +497,7 @@ func (s *wrapKeyStore) RemovePassword(password string) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.profilePasswords, profileKeyID(password))
 	for i, entry := range s.entries {
 		if entry.id != id {
 			continue
@@ -472,6 +509,13 @@ func (s *wrapKeyStore) RemovePassword(password string) {
 		s.entries = s.entries[:len(s.entries)-1]
 		return
 	}
+}
+
+func (s *wrapKeyStore) ProfilePassword(keyID string) (string, bool) {
+	s.mu.RLock()
+	password, exists := s.profilePasswords[keyID]
+	s.mu.RUnlock()
+	return password, exists
 }
 
 func (s *wrapKeyStore) Count() int {
@@ -512,6 +556,9 @@ func refreshWrapKeysFromDBLocked() error {
 func reloadDB(wgDev *device.Device) error {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
+	if clusterStore != nil {
+		return nil
+	}
 
 	data, err := os.ReadFile(dbFile)
 	if err != nil {
@@ -521,8 +568,9 @@ func reloadDB(wgDev *device.Device) error {
 	oldDB := db
 
 	newDB := &Database{
-		Passwords: make(map[string]*PasswordEntry),
-		Devices:   make(map[string]*ClientDevice),
+		Passwords:      make(map[string]*PasswordEntry),
+		Devices:        make(map[string]*ClientDevice),
+		CreateRequests: make(map[string]CreateRequestRecord),
 	}
 	if err := json.Unmarshal(data, newDB); err != nil {
 		return fmt.Errorf("parse db json: %w", err)
@@ -557,7 +605,7 @@ func reloadDB(wgDev *device.Device) error {
 	return nil
 }
 
-func initDB(dir, mainPass, adminID, botToken string) {
+func initDB(dir, mainPass, adminID, botToken, databaseURL, nodeID string) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		log.Fatalf("[DB] Не удалось создать каталог: %v", err)
 	}
@@ -583,10 +631,37 @@ func initDB(dir, mainPass, adminID, botToken string) {
 	if db.Devices == nil {
 		db.Devices = make(map[string]*ClientDevice)
 	}
+	if db.CreateRequests == nil {
+		db.CreateRequests = make(map[string]CreateRequestRecord)
+	}
 	db.MainPassword = mainPass
 	db.AdminID = adminID
 	db.BotToken = botToken
-	if err := saveDB(); err != nil {
+	if databaseURL != "" {
+		if nodeID == "" {
+			hostname, hostnameErr := os.Hostname()
+			if hostnameErr != nil {
+				log.Fatalf("[DB] Не удалось определить node ID: %v", hostnameErr)
+			}
+			nodeID = hostname
+		}
+		store, storeErr := newPostgresStore(databaseURL, nodeID)
+		if storeErr != nil {
+			log.Fatalf("[DB] PostgreSQL: %v", storeErr)
+		}
+		clusterStore = store
+		loaded, revision, loadErr := store.Initialize(db)
+		if loadErr != nil {
+			store.Close()
+			log.Fatalf("[DB] Инициализация общей базы: %v", loadErr)
+		}
+		loaded.MainPassword = mainPass
+		loaded.AdminID = adminID
+		loaded.BotToken = botToken
+		db = loaded
+		clusterNodeID = nodeID
+		dbMutex.Configure(store, revision)
+	} else if err := saveDB(); err != nil {
 		log.Fatalf("[DB] Не удалось сохранить базу: %v", err)
 	}
 	if err := refreshWrapKeysFromDBLocked(); err != nil {
@@ -599,6 +674,9 @@ func saveDB() error {
 	if err != nil {
 		log.Printf("[DB] Ошибка сериализации: %v", err)
 		return err
+	}
+	if clusterStore != nil {
+		return dbMutex.Persist(data)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(dbFile), ".passwords-*.tmp")
 	if err != nil {
@@ -1165,11 +1243,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
 					saveDB()
 				}
-				if len(db.Passwords) >= maxGeneratedPasswords {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
-					continue
-				}
 				newPass := ""
 				for i := 0; i < 10; i++ {
 					candidate, generateErr := generatePassword()
@@ -1261,11 +1334,6 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 				if cleanupExpiredPasswordsLocked(wgDev) > 0 {
 					saveDB()
 				}
-				if len(db.Passwords) >= maxGeneratedPasswords {
-					dbMutex.Unlock()
-					sendTelegram(token, adminID, fmt.Sprintf("❌ Лимит паролей: максимум %d активных. Удалите ненужный пароль через /list.", maxGeneratedPasswords), nil)
-					continue
-				}
 				dbMutex.Unlock()
 				waitingForDays = true
 				sendTelegram(token, adminID, "📅 Введите срок действия пароля в днях (1–365) и (опционально) лимит устройств через пробел:\n\n_Примеры:_\n`30` — месяц, 1 устройство\n`30 3` — месяц, до 3 устройств", nil)
@@ -1352,6 +1420,9 @@ func syncPersistedPeersToWG(wgDev *device.Device) {
 	defer dbMutex.Unlock()
 	count := 0
 	for _, dev := range db.Devices {
+		if !sharedDeviceHasActiveOwner(db, dev.DeviceID, dev) {
+			continue
+		}
 		upsertPeerInWG(wgDev, dev)
 		count++
 	}
@@ -1381,7 +1452,7 @@ func sendPasswordList(token string, adminID int64, wgDev *device.Device) {
 	if len(db.Passwords) == 0 {
 		txt += "_Нет сгенерированных паролей._\n"
 	} else {
-		txt += fmt.Sprintf("_Активно: %d/%d_\n\n", len(db.Passwords), maxGeneratedPasswords)
+		txt += fmt.Sprintf("_Ключей: %d_\n\n", len(db.Passwords))
 		index := 0
 		for p, entry := range db.Passwords {
 			index++
