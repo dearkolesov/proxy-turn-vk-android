@@ -305,6 +305,7 @@ type Database struct {
 	Passwords      map[string]*PasswordEntry      `json:"passwords"`
 	Devices        map[string]*ClientDevice       `json:"devices"`
 	CreateRequests map[string]CreateRequestRecord `json:"create_requests,omitempty"`
+	VKHashLibrary  []string                       `json:"vk_hash_library,omitempty"`
 }
 
 type CreateRequestRecord struct {

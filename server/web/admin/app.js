@@ -4,6 +4,7 @@
   const state = {
     token: sessionStorage.getItem(TOKEN_KEY) || "",
     serverAddress: localStorage.getItem(SERVER_ADDRESS_KEY) || "",
+    libraryHashes: [],
     entries: [],
     filter: "all",
     query: "",
@@ -163,11 +164,73 @@
     if (!state.token) throw new Error("Введите admin token.");
     const payload = await request("/admin/passwords");
     state.entries = Array.isArray(payload.passwords) ? payload.passwords : [];
+    await refreshHashLibrary();
     sessionStorage.setItem(TOKEN_KEY, state.token);
     setLoginError("");
     showApp();
     render();
     await refreshHealth();
+  }
+
+  function setHashLibraryStatus(message, failed = false) {
+    const status = byId("hash-library-status");
+    status.textContent = message || "";
+    status.classList.toggle("error", failed);
+  }
+
+  function renderHashLibraryCount() {
+    byId("hash-library-count").textContent = `${state.libraryHashes.length} ${plural(state.libraryHashes.length, "хеш", "хеша", "хешей")}`;
+  }
+
+  async function refreshHashLibrary() {
+    const payload = await request("/admin/vk-hash-library");
+    state.libraryHashes = Array.isArray(payload.hashes) ? payload.hashes : [];
+    renderHashLibraryCount();
+  }
+
+  async function addLibraryHashes() {
+    const hashes = byId("hash-library-input").value.trim();
+    if (!hashes) return;
+    try {
+      const payload = await request("/admin/vk-hash-library", {
+        method: "POST",
+        body: new URLSearchParams({ hashes }),
+      });
+      state.libraryHashes = payload.hashes || [];
+      byId("hash-library-input").value = "";
+      renderHashLibraryCount();
+      setHashLibraryStatus("Хеши добавлены.");
+    } catch (error) {
+      setHashLibraryStatus(error.message, true);
+    }
+  }
+
+  async function clearLibraryHashes() {
+    if (!window.confirm("Очистить библиотеку VK Hashes?")) return;
+    try {
+      await request("/admin/vk-hash-library", { method: "DELETE" });
+      state.libraryHashes = [];
+      renderHashLibraryCount();
+      setHashLibraryStatus("Библиотека очищена.");
+    } catch (error) {
+      setHashLibraryStatus(error.message, true);
+    }
+  }
+
+  function pickLibraryHashes() {
+    const count = Number.parseInt(byId("field-hash-count").value, 10);
+    if (!Number.isInteger(count) || count < 1) return;
+    if (count > state.libraryHashes.length) {
+      setFormError("editor-error", `В библиотеке только ${state.libraryHashes.length} уникальных хешей.`);
+      return;
+    }
+    const pool = [...state.libraryHashes];
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    byId("field-vk-hash").value = pool.slice(0, count).join(",");
+    setFormError("editor-error", "");
   }
 
   async function refresh() {
@@ -697,6 +760,9 @@
   byId("create-button").addEventListener("click", () => openEditor());
   byId("empty-create-button").addEventListener("click", () => openEditor());
   byId("credential-form").addEventListener("submit", saveEntry);
+  byId("add-library-hashes").addEventListener("click", addLibraryHashes);
+  byId("clear-library-hashes").addEventListener("click", clearLibraryHashes);
+  byId("pick-library-hashes").addEventListener("click", pickLibraryHashes);
   byId("refresh-button").addEventListener("click", refresh);
   byId("logout-button").addEventListener("click", () => logout());
   byId("search-input").addEventListener("input", (event) => {

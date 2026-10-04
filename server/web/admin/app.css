@@ -422,6 +422,60 @@ p {
   border-radius: 7px;
   background: var(--surface);
 }
+.hash-library-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(300px, 1.2fr);
+  gap: 12px 20px;
+  align-items: center;
+  margin-bottom: 24px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+.hash-library-panel h2 {
+  margin: 7px 0 5px;
+  font-size: 16px;
+}
+.hash-library-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.hash-library-panel textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 12px;
+}
+.hash-library-actions {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hash-library-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.hash-library-panel .server-address-status {
+  grid-column: 2;
+  margin: 0;
+}
+.hash-picker {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+}
+.hash-picker-count {
+  width: 120px;
+  margin-bottom: 0;
+}
 .overview-cell {
   min-height: 86px;
   display: flex;

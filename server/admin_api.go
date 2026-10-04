@@ -48,6 +48,45 @@ func passwordFingerprint(password string) string {
 	return fmt.Sprintf("%x", hash[:])
 }
 
+func splitVKHashes(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	seen := make(map[string]struct{}, len(parts))
+	hashes := make([]string, 0, len(parts))
+	for _, part := range parts {
+		hash := strings.TrimSpace(part)
+		if hash == "" {
+			continue
+		}
+		if _, exists := seen[hash]; exists {
+			continue
+		}
+		seen[hash] = struct{}{}
+		hashes = append(hashes, hash)
+	}
+	return hashes
+}
+
+func mergeVKHashes(existing []string, additions []string) []string {
+	merged := splitVKHashes(strings.Join(existing, ","))
+	seen := make(map[string]struct{}, len(merged)+len(additions))
+	for _, hash := range merged {
+		seen[hash] = struct{}{}
+	}
+	for _, hash := range additions {
+		if hash == "" {
+			continue
+		}
+		if _, exists := seen[hash]; exists {
+			continue
+		}
+		seen[hash] = struct{}{}
+		merged = append(merged, hash)
+	}
+	return merged
+}
+
 func cleanupCreateRequestsLocked(now time.Time) {
 	for key, record := range db.CreateRequests {
 		if now.Sub(time.Unix(record.CreatedAt, 0)) > createRequestRetention {
@@ -873,6 +912,61 @@ func handleAdminPublicAddress(w http.ResponseWriter, r *http.Request) {
 	writeAdminJSON(w, http.StatusOK, map[string]string{"address": address})
 }
 
+func handleAdminVKHashLibrary(w http.ResponseWriter, r *http.Request) {
+	setAdminCORSHeaders(w, "GET, POST, DELETE")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if !adminAuthorized(r) {
+		writeAdminError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		dbMutex.Lock()
+		hashes := append([]string(nil), db.VKHashLibrary...)
+		dbMutex.Unlock()
+		writeAdminJSON(w, http.StatusOK, map[string]interface{}{"hashes": hashes})
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid form data")
+			return
+		}
+		additions := splitVKHashes(r.FormValue("hashes"))
+		if len(additions) == 0 {
+			writeAdminError(w, http.StatusBadRequest, "hashes is required")
+			return
+		}
+		dbMutex.Lock()
+		before := append([]string(nil), db.VKHashLibrary...)
+		db.VKHashLibrary = mergeVKHashes(db.VKHashLibrary, additions)
+		if err := saveDB(); err != nil {
+			db.VKHashLibrary = before
+			dbMutex.Unlock()
+			writeAdminError(w, http.StatusInternalServerError, "failed to persist VK hash library")
+			return
+		}
+		hashes := append([]string(nil), db.VKHashLibrary...)
+		dbMutex.Unlock()
+		writeAdminJSON(w, http.StatusOK, map[string]interface{}{"hashes": hashes})
+	case http.MethodDelete:
+		dbMutex.Lock()
+		before := append([]string(nil), db.VKHashLibrary...)
+		db.VKHashLibrary = nil
+		if err := saveDB(); err != nil {
+			db.VKHashLibrary = before
+			dbMutex.Unlock()
+			writeAdminError(w, http.StatusInternalServerError, "failed to clear VK hash library")
+			return
+		}
+		dbMutex.Unlock()
+		writeAdminJSON(w, http.StatusOK, map[string]interface{}{"hashes": []string{}})
+	default:
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func registerAdminAPIRoutes(mux *http.ServeMux) {
 	registerAdminUI(mux)
 	mux.HandleFunc("/healthz", handleHealthz)
@@ -898,4 +992,5 @@ func registerAdminAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/passwords/unbind-device", handleAdminUnbindDevice)
 	mux.HandleFunc("/admin/qrcode", handleAdminQRCode)
 	mux.HandleFunc("/admin/public-address", handleAdminPublicAddress)
+	mux.HandleFunc("/admin/vk-hash-library", handleAdminVKHashLibrary)
 }

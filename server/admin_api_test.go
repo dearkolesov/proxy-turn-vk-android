@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -160,6 +161,61 @@ func TestTrafficLimitReached(t *testing.T) {
 				t.Fatalf("trafficLimitReached() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestVKHashLibraryHelpersDeduplicate(t *testing.T) {
+	got := splitVKHashes("one, two\none;one")
+	want := []string{"one", "two"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitVKHashes() = %#v, want %#v", got, want)
+	}
+	merged := mergeVKHashes([]string{"two", "three"}, []string{"one", "two"})
+	want = []string{"two", "three", "one"}
+	if !reflect.DeepEqual(merged, want) {
+		t.Fatalf("mergeVKHashes() = %#v, want %#v", merged, want)
+	}
+}
+
+func TestAdminVKHashLibraryCRUD(t *testing.T) {
+	cleanup := setupAdminCreateTest(t)
+	defer cleanup()
+	mux := http.NewServeMux()
+	registerAdminAPIRoutes(mux)
+	post := httptest.NewRequest(http.MethodPost, "/admin/vk-hash-library", strings.NewReader(url.Values{
+		"hashes": {"hash-a\nhash-b,hash-a"},
+	}.Encode()))
+	post.Header.Set("Authorization", "Bearer admin-api-test-token")
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, post)
+	if response.Code != http.StatusOK {
+		t.Fatalf("library POST status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Hashes []string `json:"hashes"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode library POST: %v", err)
+	}
+	if !reflect.DeepEqual(payload.Hashes, []string{"hash-a", "hash-b"}) {
+		t.Fatalf("library hashes = %#v", payload.Hashes)
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/admin/vk-hash-library", nil)
+	get.Header.Set("Authorization", "Bearer admin-api-test-token")
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, get)
+	if response.Code != http.StatusOK {
+		t.Fatalf("library GET status = %d", response.Code)
+	}
+
+	delete := httptest.NewRequest(http.MethodDelete, "/admin/vk-hash-library", nil)
+	delete.Header.Set("Authorization", "Bearer admin-api-test-token")
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, delete)
+	if response.Code != http.StatusOK || len(db.VKHashLibrary) != 0 {
+		t.Fatalf("library DELETE status = %d, hashes = %#v", response.Code, db.VKHashLibrary)
 	}
 }
 

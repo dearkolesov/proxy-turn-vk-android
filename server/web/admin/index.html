@@ -129,6 +129,21 @@
           <p id="server-address-status" class="server-address-status" role="status"></p>
         </section>
 
+        <section class="hash-library-panel" aria-labelledby="hash-library-title">
+          <div>
+            <div class="eyebrow">БИБЛИОТЕКА</div>
+            <h2 id="hash-library-title">VK Hashes</h2>
+            <p>Добавьте рабочие хеши, по одному в строке. Они будут доступны при создании ключа.</p>
+          </div>
+          <textarea id="hash-library-input" rows="3" placeholder="hash_1&#10;hash_2&#10;hash_3"></textarea>
+          <div class="hash-library-actions">
+            <button id="add-library-hashes" class="button button-primary" type="button">Добавить</button>
+            <button id="clear-library-hashes" class="button button-quiet" type="button">Очистить библиотеку</button>
+            <span id="hash-library-count" class="hash-library-count">0 хешей</span>
+          </div>
+          <p id="hash-library-status" class="server-address-status" role="status"></p>
+        </section>
+
         <section class="overview" aria-label="Сводка">
           <div class="overview-cell">
             <span class="overview-label">Всего ключей</span
@@ -250,6 +265,15 @@
               >Несколько hash можно разделить запятой или новой строкой.</small
             ></label
           >
+          <div class="hash-picker">
+            <label class="field hash-picker-count"
+              ><span>Случайно выбрать</span
+              ><input id="field-hash-count" type="number" min="1" value="1"
+            /></label>
+            <button id="pick-library-hashes" class="button button-quiet" type="button">
+              Выбрать из библиотеки
+            </button>
+          </div>
           <div class="field-grid">
             <label class="field"
               ><span id="days-label">Срок, дней</span
