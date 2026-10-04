@@ -39,6 +39,15 @@ func setupFullConeNAT(wgIface string) error {
 	return nil
 }
 
+func removeManagedWGNAT(extIface string) {
+	if !commandExists("iptables") {
+		return
+	}
+	for i := 0; i < 5; i++ {
+		exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", wgServerCIDR, "-o", extIface, "-m", "comment", "--comment", "WDTT_MANAGED", "-j", "MASQUERADE").Run()
+	}
+}
+
 func setupNftNAT(extIface string) {
 	exec.Command("nft", "add", "table", "ip", "wdtt").Run()
 	exec.Command("nft", "add", "chain", "ip", "wdtt", "postrouting", "{ type nat hook postrouting priority 100; }").Run()

@@ -41,7 +41,13 @@ func main() {
 	databaseURL := flag.String("database-url", os.Getenv("WDTT_DATABASE_URL"), "PostgreSQL DSN для общего состояния нескольких нод; пусто = локальный JSON")
 	nodeID := flag.String("node-id", os.Getenv("WDTT_NODE_ID"), "Уникальный ID этой ноды (по умолчанию hostname)")
 	botNodeID := flag.String("bot-node-id", os.Getenv("WDTT_BOT_NODE_ID"), "ID единственной ноды для Telegram polling в cluster mode; пусто = бот выключен")
+	xrayTProxyPort := flag.Int("xray-tproxy-port", 0, "локальный Xray TProxy TCP/UDP порт; 0 = обычный NAT")
+	xrayTProxyMark := flag.Int("xray-tproxy-mark", 1, "fwmark для Xray TProxy policy routing")
+	xrayTProxyTable := flag.Int("xray-tproxy-table", 100, "номер routing table для Xray TProxy")
 	flag.Parse()
+	if *xrayTProxyPort < 0 || *xrayTProxyPort > 65535 || *xrayTProxyMark < 1 || *xrayTProxyMark > 0xffff || *xrayTProxyTable < 1 || *xrayTProxyTable > 252 {
+		log.Fatal("[XRAY] invalid TProxy port, mark or routing table")
+	}
 	dns = *dnsFlag
 	mainPasswordValue, err := loadOptionalSecret(*mainPass, *mainPassFile)
 	if err != nil {
@@ -105,6 +111,13 @@ func main() {
 		log.Fatalf("[WG] Запуск: %v", err)
 	}
 	globalWgDev = wgDev
+	if *xrayTProxyPort > 0 {
+		cleanupTProxy, tproxyErr := setupXrayTProxy(wgIfaceName, *xrayTProxyPort, *xrayTProxyMark, *xrayTProxyTable)
+		if tproxyErr != nil {
+			log.Fatalf("[XRAY] TProxy: %v", tproxyErr)
+		}
+		defer cleanupTProxy()
+	}
 	if removed := cleanupExpiredPasswords(wgDev); removed > 0 {
 		log.Printf("[DB] Удалено истёкших паролей при старте: %d", removed)
 	}

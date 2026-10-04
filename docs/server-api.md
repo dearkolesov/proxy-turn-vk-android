@@ -32,6 +32,10 @@ export WDTT_NODE_ID='vpn-node-a'
 
 Load balancer должен проверять `GET /healthz` каждой ноды на HTTPS admin listener и выводить её из rotation при `503`. Внешний UDP-трафик DTLS/обфусцированных туннелей должен сохранять affinity одного UDP flow к одной ноде: внутренняя сессия и NAT state не переносятся между серверами. Общая БД синхронизирует credentials, device slots, настройки, challenge nonce и online counts, но не проксирует уже установленные туннельные соединения. Для admin HTTPS используйте одинаковый сертификат и ключ на нодах за общим hostname либо TLS termination на ingress с корректной проверкой backend; иначе certificate pinning Android-клиента может отвергать ноду с другим сертификатом.
 
+### Xray TProxy egress (experimental)
+
+Опционально можно направить IPv4 TCP/UDP-трафик из WireGuard интерфейса `wdtt0` в Xray TProxy inbound. Настройте Xray inbound `dokodemo-door` с `followRedirect: true`, `network: "tcp,udp"`, `sockopt.tproxy: "tproxy"` и listener, принимающий transparent traffic (обычно `0.0.0.0:<port>`, не loopback-only). Затем запустите сервер с `-xray-tproxy-port <port>` (например, `12345`). По умолчанию используются fwmark `1` и routing table `100`; их можно переопределить `-xray-tproxy-mark` и `-xray-tproxy-table`. Режим требует Linux, `iptables` с TPROXY target, `ip` и root/CAP_NET_ADMIN. Сервер переключает WG egress с MASQUERADE на TProxy и возвращает обычный NAT при штатном завершении. Не включайте второй Xray transparent-proxy слой одновременно для raw-интерфейса. Настройте Xray outbound и исключения маршрутизации так, чтобы сокеты Xray и администрирование сервера не попадали обратно в TProxy. UDP outbound зависит от конфигурации Xray; ICMP через этот режим не проксируется. Это experimental-функция: проверяйте правила и удалённый доступ на тестовой ноде перед production.
+
 Оба HTTP-сервера ограничивают тело запроса размером 64 КиБ, заголовки — 16 КиБ; тайм-ауты чтения и записи — 10 секунд, чтения заголовков — 5 секунд.
 
 ## Административный API
