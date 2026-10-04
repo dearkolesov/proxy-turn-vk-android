@@ -136,11 +136,15 @@
             <p>Добавьте рабочие хеши, по одному в строке. Они будут доступны при создании ключа.</p>
           </div>
           <textarea id="hash-library-input" rows="3" placeholder="hash_1&#10;hash_2&#10;hash_3"></textarea>
+          <input id="hash-check-proxy" class="hash-check-proxy" type="text" value="socks5://localhost:9393" placeholder="socks5://localhost:9393" autocomplete="off" />
           <div class="hash-library-actions">
             <button id="add-library-hashes" class="button button-primary" type="button">Добавить</button>
+            <button id="check-library-hashes" class="button button-quiet" type="button">Проверить хеши</button>
+            <button id="remove-bad-library-hashes" class="button button-quiet" type="button">Удалить нерабочие</button>
             <button id="clear-library-hashes" class="button button-quiet" type="button">Очистить библиотеку</button>
             <span id="hash-library-count" class="hash-library-count">0 хешей</span>
           </div>
+          <div id="hash-check-results" class="hash-check-results" hidden></div>
           <p id="hash-library-status" class="server-address-status" role="status"></p>
         </section>
 

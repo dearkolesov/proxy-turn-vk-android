@@ -1,10 +1,12 @@
 (() => {
   const TOKEN_KEY = "qwdtt.adminToken";
   const SERVER_ADDRESS_KEY = "qwdtt.serverAddress";
+  const HASH_CHECK_PROXY_KEY = "qwdtt.hashCheckProxy";
   const state = {
     token: sessionStorage.getItem(TOKEN_KEY) || "",
     serverAddress: localStorage.getItem(SERVER_ADDRESS_KEY) || "",
     libraryHashes: [],
+    hashCheckResults: [],
     entries: [],
     filter: "all",
     query: "",
@@ -214,6 +216,63 @@
       setHashLibraryStatus("Библиотека очищена.");
     } catch (error) {
       setHashLibraryStatus(error.message, true);
+    }
+  }
+
+  function hashCheckProxy() {
+    const proxyURL = byId("hash-check-proxy").value.trim();
+    localStorage.setItem(HASH_CHECK_PROXY_KEY, proxyURL);
+    return proxyURL;
+  }
+
+  function renderHashCheckResults() {
+    const container = byId("hash-check-results");
+    container.replaceChildren();
+    if (!state.hashCheckResults.length) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    for (const result of state.hashCheckResults) {
+      const row = element("div", `hash-check-result ${result.working ? "working" : "broken"}`);
+      row.append(
+        element("code", "", result.hash),
+        element("span", "", result.working ? "Работает" : `Не работает: ${result.reason || "нет ответа"}`),
+      );
+      container.append(row);
+    }
+  }
+
+  async function checkLibraryHashes(removeNonWorking = false) {
+    const proxyURL = hashCheckProxy();
+    if (!proxyURL) {
+      setHashLibraryStatus("Укажите SOCKS5 или HTTP proxy.", true);
+      return;
+    }
+    const button = byId(removeNonWorking ? "remove-bad-library-hashes" : "check-library-hashes");
+    button.disabled = true;
+    setHashLibraryStatus("Проверяем хеши через прокси…");
+    try {
+      const path = removeNonWorking
+        ? "/admin/vk-hash-library/remove-non-working"
+        : "/admin/vk-hash-library/check";
+      const payload = await request(path, {
+        method: "POST",
+        body: new URLSearchParams({ proxy_url: proxyURL }),
+      });
+      state.hashCheckResults = payload.results || [];
+      if (removeNonWorking) state.libraryHashes = payload.hashes || [];
+      renderHashLibraryCount();
+      renderHashCheckResults();
+      setHashLibraryStatus(
+        removeNonWorking
+          ? `Удалено нерабочих хешей: ${payload.removed || 0}.`
+          : "Проверка завершена.",
+      );
+    } catch (error) {
+      setHashLibraryStatus(error.message, true);
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -761,8 +820,11 @@
   byId("empty-create-button").addEventListener("click", () => openEditor());
   byId("credential-form").addEventListener("submit", saveEntry);
   byId("add-library-hashes").addEventListener("click", addLibraryHashes);
+  byId("check-library-hashes").addEventListener("click", () => checkLibraryHashes(false));
+  byId("remove-bad-library-hashes").addEventListener("click", () => checkLibraryHashes(true));
   byId("clear-library-hashes").addEventListener("click", clearLibraryHashes);
   byId("pick-library-hashes").addEventListener("click", pickLibraryHashes);
+  byId("hash-check-proxy").value = localStorage.getItem(HASH_CHECK_PROXY_KEY) || "socks5://localhost:9393";
   byId("refresh-button").addEventListener("click", refresh);
   byId("logout-button").addEventListener("click", () => logout());
   byId("search-input").addEventListener("input", (event) => {

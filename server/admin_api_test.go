@@ -224,6 +224,19 @@ func TestAdminVKHashLibraryCRUD(t *testing.T) {
 	}
 }
 
+func TestVKHashCheckProxyURLValidation(t *testing.T) {
+	if _, err := newVKHashCheckClient(""); err == nil {
+		t.Fatal("empty proxy URL was accepted")
+	}
+	if _, err := newVKHashCheckClient("ftp://localhost:21"); err == nil {
+		t.Fatal("unsupported proxy scheme was accepted")
+	}
+	client, err := newVKHashCheckClient("socks5://localhost:9393")
+	if err != nil || client == nil {
+		t.Fatalf("SOCKS5 proxy URL rejected: %v", err)
+	}
+}
+
 func postAdminCreatePassword(key, vkHash string) *httptest.ResponseRecorder {
 	return postAdminForm("/admin/passwords", key, url.Values{
 		"vk_hash":     {vkHash},

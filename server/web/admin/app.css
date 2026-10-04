@@ -452,6 +452,38 @@ p {
   font: inherit;
   font-size: 12px;
 }
+.hash-check-proxy {
+  grid-column: 2;
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 12px;
+}
+.hash-check-results {
+  grid-column: 2;
+  display: grid;
+  gap: 5px;
+  max-height: 180px;
+  overflow: auto;
+}
+.hash-check-result {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+.hash-check-result.working {
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+.hash-check-result.broken {
+  background: var(--red-soft);
+  color: var(--red);
+}
 .hash-library-actions {
   grid-column: 2;
   display: flex;
@@ -1235,7 +1267,9 @@ tbody tr:hover {
     grid-template-columns: 1fr;
   }
   .hash-library-actions,
-  .hash-library-panel .server-address-status {
+  .hash-library-panel .server-address-status,
+  .hash-check-proxy,
+  .hash-check-results {
     grid-column: 1;
   }
   .hash-library-actions {

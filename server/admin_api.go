@@ -986,6 +986,94 @@ func handleAdminVKHashLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleAdminVKHashCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !adminAuthorized(r) {
+		writeAdminError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid form data")
+		return
+	}
+	proxyURL := strings.TrimSpace(r.FormValue("proxy_url"))
+	if proxyURL == "" {
+		writeAdminError(w, http.StatusBadRequest, "proxy_url is required")
+		return
+	}
+	dbMutex.Lock()
+	hashes := append([]string(nil), db.VKHashLibrary...)
+	dbMutex.Unlock()
+	if len(hashes) == 0 {
+		writeAdminError(w, http.StatusBadRequest, "VK hash library is empty")
+		return
+	}
+	results, err := checkVKHashes(r.Context(), hashes, proxyURL)
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]interface{}{"results": results})
+}
+
+func handleAdminVKHashRemoveNonWorking(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !adminAuthorized(r) {
+		writeAdminError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid form data")
+		return
+	}
+	proxyURL := strings.TrimSpace(r.FormValue("proxy_url"))
+	if proxyURL == "" {
+		writeAdminError(w, http.StatusBadRequest, "proxy_url is required")
+		return
+	}
+	dbMutex.Lock()
+	hashes := append([]string(nil), db.VKHashLibrary...)
+	dbMutex.Unlock()
+	if len(hashes) == 0 {
+		writeAdminError(w, http.StatusBadRequest, "VK hash library is empty")
+		return
+	}
+	results, err := checkVKHashes(r.Context(), hashes, proxyURL)
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	working := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		if result.Working {
+			working[result.Hash] = struct{}{}
+		}
+	}
+	dbMutex.Lock()
+	before := append([]string(nil), db.VKHashLibrary...)
+	filtered := make([]string, 0, len(working))
+	for _, hash := range db.VKHashLibrary {
+		if _, ok := working[hash]; ok {
+			filtered = append(filtered, hash)
+		}
+	}
+	db.VKHashLibrary = filtered
+	if err := saveDB(); err != nil {
+		db.VKHashLibrary = before
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist VK hash library cleanup")
+		return
+	}
+	dbMutex.Unlock()
+	writeAdminJSON(w, http.StatusOK, map[string]interface{}{"removed": len(before) - len(filtered), "hashes": filtered, "results": results})
+}
+
 func registerAdminAPIRoutes(mux *http.ServeMux) {
 	registerAdminUI(mux)
 	mux.HandleFunc("/healthz", handleHealthz)
@@ -1012,4 +1100,6 @@ func registerAdminAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/qrcode", handleAdminQRCode)
 	mux.HandleFunc("/admin/public-address", handleAdminPublicAddress)
 	mux.HandleFunc("/admin/vk-hash-library", handleAdminVKHashLibrary)
+	mux.HandleFunc("/admin/vk-hash-library/check", handleAdminVKHashCheck)
+	mux.HandleFunc("/admin/vk-hash-library/remove-non-working", handleAdminVKHashRemoveNonWorking)
 }
