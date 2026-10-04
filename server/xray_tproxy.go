@@ -6,8 +6,6 @@ import (
 	"strconv"
 )
 
-const xrayTProxyOnIP = "127.0.0.1"
-
 type tproxySysctl struct {
 	name  string
 	value string
@@ -90,7 +88,7 @@ func setupXrayTProxy(wgIface string, port, mark, table int) (func(), error) {
 		}
 	}
 	for _, protocol := range []string{"tcp", "udp"} {
-		args := []string{"-t", "mangle", "-A", chain, "-p", protocol, "-j", "TPROXY", "--on-ip", xrayTProxyOnIP, "--on-port", strconv.Itoa(port), "--tproxy-mark", markMask}
+		args := []string{"-t", "mangle", "-A", chain, "-p", protocol, "-j", "TPROXY", "--on-port", strconv.Itoa(port), "--tproxy-mark", markMask}
 		if _, err := runCmd("iptables", args...); err != nil {
 			cleanupXrayTProxy(wgIface, chain, markMask, tableValue, sysctls, extIface)
 			return func() {}, fmt.Errorf("add TProxy %s rule: %w", protocol, err)
@@ -101,8 +99,8 @@ func setupXrayTProxy(wgIface string, port, mark, table int) (func(), error) {
 		return func() {}, fmt.Errorf("attach TProxy chain: %w", err)
 	}
 
-	natType = fmt.Sprintf("XRAY TPROXY 127.0.0.1:%d ✅", port)
-	log.Printf("[XRAY] TProxy: %s -> 127.0.0.1:%d, mark=%s, table=%s", wgIface, port, markValue, tableValue)
+	natType = fmt.Sprintf("XRAY TPROXY :%d ✅", port)
+	log.Printf("[XRAY] TProxy: %s -> transparent port %d, mark=%s, table=%s", wgIface, port, markValue, tableValue)
 	log.Printf("[XRAY] Verify: ip rule fwmark %s table %s; local route table %s; iptables chain %s", markMask, tableValue, tableValue, chain)
 	return func() {
 		cleanupXrayTProxy(wgIface, chain, markMask, tableValue, sysctls, extIface)

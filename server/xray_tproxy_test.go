@@ -12,14 +12,8 @@ func TestTProxyChainName(t *testing.T) {
 	}
 }
 
-func TestTProxyOnIP(t *testing.T) {
-	if xrayTProxyOnIP != "127.0.0.1" {
-		t.Fatalf("TProxy on-ip = %q", xrayTProxyOnIP)
-	}
-}
-
 func TestTProxyStatus(t *testing.T) {
-	if got, want := fmt.Sprintf("XRAY TPROXY 127.0.0.1:%d ✅", 12345), "XRAY TPROXY 127.0.0.1:12345 ✅"; got != want {
+	if got, want := fmt.Sprintf("XRAY TPROXY :%d ✅", 12345), "XRAY TPROXY :12345 ✅"; got != want {
 		t.Fatalf("TProxy status = %q, want %q", got, want)
 	}
 }
