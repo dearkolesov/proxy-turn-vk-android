@@ -6,6 +6,8 @@ import (
 	"strconv"
 )
 
+const xrayTProxyOnIP = "127.0.0.1"
+
 type tproxySysctl struct {
 	name  string
 	value string
@@ -84,7 +86,7 @@ func setupXrayTProxy(wgIface string, port, mark, table int) (func(), error) {
 		}
 	}
 	for _, protocol := range []string{"tcp", "udp"} {
-		args := []string{"-t", "mangle", "-A", chain, "-p", protocol, "-j", "TPROXY", "--on-port", strconv.Itoa(port), "--tproxy-mark", markMask}
+		args := []string{"-t", "mangle", "-A", chain, "-p", protocol, "-j", "TPROXY", "--on-ip", xrayTProxyOnIP, "--on-port", strconv.Itoa(port), "--tproxy-mark", markMask}
 		if _, err := runCmd("iptables", args...); err != nil {
 			cleanupXrayTProxy(wgIface, chain, markMask, tableValue, sysctls, extIface)
 			return func() {}, fmt.Errorf("add TProxy %s rule: %w", protocol, err)

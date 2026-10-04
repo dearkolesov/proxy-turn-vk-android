@@ -11,6 +11,12 @@ func TestTProxyChainName(t *testing.T) {
 	}
 }
 
+func TestTProxyOnIP(t *testing.T) {
+	if xrayTProxyOnIP != "127.0.0.1" {
+		t.Fatalf("TProxy on-ip = %q", xrayTProxyOnIP)
+	}
+}
+
 func TestTProxyExcludesNonPublicDestinations(t *testing.T) {
 	want := []string{
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
