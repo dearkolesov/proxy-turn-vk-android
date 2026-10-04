@@ -368,6 +368,11 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 			clientConn.Write([]byte("DENIED:deactivated"))
 			return
 		}
+		if valid && isGenPass && trafficLimitReached(entry) {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:traffic_limit"))
+			return
+		}
 		if valid && isGenPass && !entry.canConnectAndBind(deviceID) {
 			dbMutex.Unlock()
 			clientConn.Write([]byte("DENIED:device_mismatch"))
@@ -461,6 +466,11 @@ func handleConnRaw(ctx context.Context, clientConn net.Conn, router *rawRouter) 
 		if !valid || !bound {
 			dbMutex.Unlock()
 			clientConn.Write([]byte("DENIED:device_mismatch"))
+			return
+		}
+		if isGenPass && trafficLimitReached(entry) {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:traffic_limit"))
 			return
 		}
 		dev, exists := db.Devices[deviceID]

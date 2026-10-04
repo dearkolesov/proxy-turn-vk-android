@@ -18,11 +18,23 @@ import (
 )
 
 type createPasswordFingerprint struct {
-	VkHash     string `json:"vk_hash"`
-	Days       int    `json:"days"`
-	MaxDevices int    `json:"max_devices"`
-	Ports      string `json:"ports"`
-	Label      string `json:"label"`
+	VkHash       string `json:"vk_hash"`
+	Days         int    `json:"days"`
+	MaxDevices   int    `json:"max_devices"`
+	TrafficLimit int64  `json:"traffic_limit_bytes"`
+	Ports        string `json:"ports"`
+	Label        string `json:"label"`
+}
+
+func parseTrafficLimit(value string) (int64, error) {
+	if strings.TrimSpace(value) == "" {
+		return 0, nil
+	}
+	limit, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || limit < 0 {
+		return 0, fmt.Errorf("traffic_limit_bytes must be a non-negative integer")
+	}
+	return limit, nil
 }
 
 func fingerprintCreatePassword(request createPasswordFingerprint) string {
@@ -144,6 +156,7 @@ type adminPasswordView struct {
 	IsDeactivated bool     `json:"is_deactivated"`
 	DownBytes     int64    `json:"down_bytes"`
 	UpBytes       int64    `json:"up_bytes"`
+	TrafficLimit  int64    `json:"traffic_limit_bytes,omitempty"`
 	ActiveDevices int      `json:"active_devices"`
 }
 
@@ -181,6 +194,7 @@ func buildAdminPasswordView(pass string, entry *PasswordEntry) adminPasswordView
 		IsDeactivated: entry.IsDeactivated,
 		DownBytes:     entry.DownBytes,
 		UpBytes:       entry.UpBytes,
+		TrafficLimit:  entry.TrafficLimit,
 		ActiveDevices: 0,
 	}
 }
@@ -246,7 +260,7 @@ func handleAdminListPasswords(w http.ResponseWriter, r *http.Request) {
 
 // POST /admin/passwords — создать новый пароль
 // Form: vk_hash (required), days (optional, default 30), max_devices (optional, default 1),
-// ports (optional), label (optional — имя человека/заметка, если пусто — авто "Доступ N")
+// traffic_limit_bytes (optional, 0 = unlimited), ports (optional), label (optional).
 func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 	setAdminCORSHeaders(w, "POST")
 	if r.Method == http.MethodOptions {
@@ -285,6 +299,11 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 		}
 		maxDevices = parsed
 	}
+	trafficLimit, err := parseTrafficLimit(r.FormValue("traffic_limit_bytes"))
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	ports := r.FormValue("ports")
 	label := r.FormValue("label")
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
@@ -293,11 +312,12 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestHash := fingerprintCreatePassword(createPasswordFingerprint{
-		VkHash:     vkHash,
-		Days:       days,
-		MaxDevices: maxDevices,
-		Ports:      ports,
-		Label:      label,
+		VkHash:       vkHash,
+		Days:         days,
+		MaxDevices:   maxDevices,
+		TrafficLimit: trafficLimit,
+		Ports:        ports,
+		Label:        label,
 	})
 	idempotencyHash := ""
 	if idempotencyKey != "" {
@@ -371,11 +391,12 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 		label = nextPasswordLabel()
 	}
 	entry := &PasswordEntry{
-		Label:      label,
-		ExpiresAt:  time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix(),
-		MaxDevices: maxDevices,
-		VkHash:     vkHash,
-		Ports:      ports,
+		Label:        label,
+		ExpiresAt:    time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix(),
+		MaxDevices:   maxDevices,
+		TrafficLimit: trafficLimit,
+		VkHash:       vkHash,
+		Ports:        ports,
 	}
 	db.Passwords[newPass] = entry
 	if idempotencyHash != "" {
@@ -400,7 +421,7 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /admin/passwords/update — редактирование уже существующего пароля.
-// Form: password (required), label/vk_hash/max_devices/days — любые из них,
+// Form: password (required), label/vk_hash/max_devices/days/traffic_limit_bytes — любые из них,
 // только присланные поля меняются, остальные остаются как были. days, если
 // передан, пересчитывает expires_at от текущего момента (как /new в боте).
 func handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
@@ -417,7 +438,6 @@ func handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-
 	if err := r.ParseForm(); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid form data")
 		return
@@ -443,6 +463,16 @@ func handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		days = parsed
+	}
+	trafficLimit := int64(-1)
+	_, hasTrafficLimit := r.Form["traffic_limit_bytes"]
+	if hasTrafficLimit {
+		parsed, err := parseTrafficLimit(r.FormValue("traffic_limit_bytes"))
+		if err != nil {
+			writeAdminError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		trafficLimit = parsed
 	}
 
 	pass := r.FormValue("password")
@@ -471,6 +501,9 @@ func handleAdminUpdatePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Form.Has("days") {
 		entry.ExpiresAt = time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
+	}
+	if hasTrafficLimit {
+		entry.TrafficLimit = trafficLimit
 	}
 
 	if err := saveDB(); err != nil {
@@ -637,6 +670,60 @@ func handleAdminDeletePassword(w http.ResponseWriter, r *http.Request) {
 	dbMutex.Unlock()
 
 	writeAdminJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+// POST /admin/passwords/reset-traffic — Form: password
+func handleAdminResetTraffic(w http.ResponseWriter, r *http.Request) {
+	setAdminCORSHeaders(w, "POST")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if !adminAuthorized(r) {
+		writeAdminError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAdminError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	pass := r.FormValue("password")
+	if pass == "" {
+		writeAdminError(w, http.StatusBadRequest, "password is required")
+		return
+	}
+	dbMutex.Lock()
+	entry, exists := db.Passwords[pass]
+	if !exists || entry == nil {
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusNotFound, "password not found")
+		return
+	}
+	entryBefore := clonePasswordEntry(entry)
+	devicesBefore := make(map[string]*ClientDevice)
+	for _, deviceID := range entryDeviceIDs(entry) {
+		if device := db.Devices[deviceID]; device != nil {
+			devicesBefore[deviceID] = cloneClientDevice(device)
+			device.UpBytes = 0
+			device.DownBytes = 0
+		}
+	}
+	entry.UpBytes = 0
+	entry.DownBytes = 0
+	resetWGTrafficBaselinesLocked(entryDeviceIDs(entry))
+	resetRawTrafficCounters(entryDeviceIDs(entry))
+	if err := saveDB(); err != nil {
+		*entry = *entryBefore
+		for deviceID, device := range devicesBefore {
+			db.Devices[deviceID] = device
+		}
+		dbMutex.Unlock()
+		writeAdminError(w, http.StatusInternalServerError, "failed to persist traffic reset")
+		return
+	}
+	view := toAdminPasswordView(pass, entry)
+	dbMutex.Unlock()
+	writeAdminJSON(w, http.StatusOK, view)
 }
 
 // disconnectPasswordDevicesLocked отключает от WG все устройства, привязанные
@@ -806,6 +893,7 @@ func registerAdminAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/passwords/deactivate", handleAdminDeactivatePassword)
 	mux.HandleFunc("/admin/passwords/activate", handleAdminActivatePassword)
 	mux.HandleFunc("/admin/passwords/delete", handleAdminDeletePassword)
+	mux.HandleFunc("/admin/passwords/reset-traffic", handleAdminResetTraffic)
 	mux.HandleFunc("/admin/passwords/update", handleAdminUpdatePassword)
 	mux.HandleFunc("/admin/passwords/unbind-device", handleAdminUnbindDevice)
 	mux.HandleFunc("/admin/qrcode", handleAdminQRCode)

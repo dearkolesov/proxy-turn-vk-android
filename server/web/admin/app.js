@@ -252,6 +252,11 @@
     return `${size.toFixed(size >= 100 ? 0 : 1)} ${units[index]}`;
   }
 
+  function formatTrafficLimit(value) {
+    const limit = Number(value) || 0;
+    return limit > 0 ? formatBytes(limit) : "Без лимита";
+  }
+
   function filteredEntries() {
     const needle = state.query.trim().toLocaleLowerCase("ru-RU");
     return state.entries.filter((entry) => {
@@ -391,6 +396,7 @@
     byId("field-days").required = !entry;
     byId("days-label").textContent = entry ? "Продлить, дней" : "Срок, дней";
     byId("field-max-devices").value = String(entry?.max_devices || 1);
+    byId("field-traffic-limit").value = entry?.traffic_limit_bytes || "";
     byId("field-ports").value = entry?.ports || "";
     byId("ports-field").hidden = Boolean(entry);
     setFormError("editor-error", "");
@@ -411,6 +417,7 @@
         .replace(/[;\n]+/g, ","),
     );
     body.set("max_devices", byId("field-max-devices").value || "1");
+    body.set("traffic_limit_bytes", byId("field-traffic-limit").value || "0");
     if (byId("field-days").value) body.set("days", byId("field-days").value);
     const editing = state.editing;
     const path = editing ? "/admin/passwords/update" : "/admin/passwords";
@@ -484,6 +491,9 @@
     byId("detail-active-count").textContent = String(entry.active_devices || 0);
     byId("detail-down").textContent = formatBytes(entry.down_bytes);
     byId("detail-up").textContent = formatBytes(entry.up_bytes);
+    byId("detail-traffic-limit").textContent = formatTrafficLimit(
+      entry.traffic_limit_bytes,
+    );
     byId("device-subtitle").textContent =
       `${(entry.device_ids || []).length} из ${entry.max_devices || 1} слотов занято`;
     byId("detail-toggle").textContent = entry.is_deactivated
@@ -577,6 +587,19 @@
       });
       await request("/admin/passwords/unbind-device", { method: "POST", body });
       toast("Все устройства отвязаны");
+      await refresh();
+    } catch (error) {
+      setFormError("detail-error", error.message);
+    }
+  }
+
+  async function resetTraffic() {
+    const entry = state.selected;
+    if (!entry || !window.confirm("Сбросить счётчики трафика этого ключа?")) return;
+    try {
+      const body = new URLSearchParams({ password: entry.password });
+      await request("/admin/passwords/reset-traffic", { method: "POST", body });
+      toast("Счётчики трафика сброшены");
       await refresh();
     } catch (error) {
       setFormError("detail-error", error.message);
@@ -724,6 +747,7 @@
   byId("detail-delete").addEventListener("click", () => {
     if (state.selected) deleteEntry(state.selected);
   });
+  byId("reset-traffic").addEventListener("click", resetTraffic);
   byId("unbind-all-button").addEventListener("click", unbindAll);
   details.addEventListener("close", () => {
     byId("qr-image").removeAttribute("src");

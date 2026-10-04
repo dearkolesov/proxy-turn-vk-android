@@ -271,6 +271,16 @@
                 value="1"
             /></label>
           </div>
+          <label class="field"
+            ><span>Лимит трафика, байт <em>необязательно, 0 — без лимита</em></span
+            ><input
+              id="field-traffic-limit"
+              name="traffic_limit_bytes"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="Например, 10737418240"
+          /></label>
           <label id="ports-field" class="field"
             ><span>Порты для ссылки <em>необязательно</em></span
             ><input
@@ -391,6 +401,9 @@
             <div>
               <span>Исходящий трафик</span><strong id="detail-up">—</strong>
             </div>
+            <div>
+              <span>Лимит трафика</span><strong id="detail-traffic-limit">—</strong>
+            </div>
           </div>
           <div class="device-heading">
             <div>
@@ -417,8 +430,11 @@
             id="detail-delete"
             class="button button-danger"
             type="button"
-          >
-            Удалить ключ
+           >
+             Удалить ключ
+           </button>
+          <button id="reset-traffic" class="button button-quiet" type="button">
+            Сбросить трафик
           </button>
         </footer>
       </section>

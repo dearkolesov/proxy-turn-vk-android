@@ -71,6 +71,73 @@ func addRawDownlinkBytes(deviceID string, n int64) {
 	rawDeviceTrafficMu.Unlock()
 }
 
+func trafficLimitReached(entry *PasswordEntry) bool {
+	return entry != nil && entry.TrafficLimit > 0 && entry.UpBytes+entry.DownBytes >= entry.TrafficLimit
+}
+
+func limitedPasswordsLocked() []string {
+	limited := make([]string, 0)
+	for password, entry := range db.Passwords {
+		if trafficLimitReached(entry) {
+			limited = append(limited, password)
+		}
+	}
+	return limited
+}
+
+func resetRawTrafficCounters(deviceIDs []string) {
+	set := make(map[string]struct{}, len(deviceIDs))
+	for _, deviceID := range deviceIDs {
+		set[deviceID] = struct{}{}
+	}
+	rawDeviceTrafficMu.Lock()
+	for deviceID := range set {
+		delete(rawDeviceTraffic, deviceID)
+	}
+	rawDeviceTrafficMu.Unlock()
+}
+
+func resetWGTrafficBaselinesLocked(deviceIDs []string) {
+	if globalWgDev == nil {
+		return
+	}
+	set := make(map[string]struct{}, len(deviceIDs))
+	for _, deviceID := range deviceIDs {
+		set[deviceID] = struct{}{}
+	}
+	devicesByPublicKey := make(map[string]string, len(set))
+	for deviceID := range set {
+		if device := db.Devices[deviceID]; device != nil {
+			if publicKey, err := b64ToHex(device.PubKey); err == nil {
+				devicesByPublicKey[publicKey] = deviceID
+			}
+		}
+	}
+	ipcOut, err := globalWgDev.IpcGet()
+	if err != nil {
+		return
+	}
+	var publicKey string
+	var rx, tx int64
+	for _, line := range strings.Split(ipcOut, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "public_key=") {
+			if _, ok := devicesByPublicKey[publicKey]; ok {
+				lastWGStats[publicKey] = struct{ rx, tx int64 }{rx, tx}
+			}
+			publicKey = strings.TrimPrefix(line, "public_key=")
+			rx, tx = 0, 0
+		} else if strings.HasPrefix(line, "rx_bytes=") {
+			fmt.Sscanf(line, "rx_bytes=%d", &rx)
+		} else if strings.HasPrefix(line, "tx_bytes=") {
+			fmt.Sscanf(line, "tx_bytes=%d", &tx)
+		}
+	}
+	if _, ok := devicesByPublicKey[publicKey]; ok {
+		lastWGStats[publicKey] = struct{ rx, tx int64 }{rx, tx}
+	}
+}
+
 // flushRawDeviceTraffic переносит накопленные с прошлого вызова байты в
 // db.Devices/db.Passwords (вызывающий должен держать dbMutex — см. вызов в
 // statsLoop, тот же паттерн, что updateTrafficFromWG под тем же локом).
@@ -213,12 +280,16 @@ func statsLoop(ctx context.Context, configDir string) {
 			flushRawDeviceTrafficLocked()
 			numPasswords := len(db.Passwords)
 			numDevices := len(db.Devices)
+			limited := limitedPasswordsLocked()
 			saveTicks++
 			if saveTicks >= 6 { // 6 * 10 секунд = 60 секунд
 				saveTicks = 0
 				saveDB()
 			}
 			dbMutex.Unlock()
+			for _, password := range limited {
+				disconnectCredentialConnections(password)
+			}
 
 			uptimeStr := formatUptime(uptime)
 			downGB := float64(toC) / (1024 * 1024 * 1024)

@@ -50,13 +50,14 @@ func cloneClientDevice(device *ClientDevice) *ClientDevice {
 }
 
 type PasswordEntry struct {
-	Label         string   `json:"label,omitempty"` // понятное имя в боте
-	DeviceID      string   `json:"device_id"`       // Для обратной совместимости, если нужно
-	DeviceIDs     []string `json:"device_ids"`      // Список привязанных deviceID
-	MaxDevices    int      `json:"max_devices"`     // Максимальное кол-во устройств (0 или 1 = 1 устройство)
-	ExpiresAt     int64    `json:"expires_at"`      // unix timestamp
-	DownBytes     int64    `json:"down_bytes"`      // скачано клиентом
-	UpBytes       int64    `json:"up_bytes"`        // отдано клиентом
+	Label         string   `json:"label,omitempty"`               // понятное имя в боте
+	DeviceID      string   `json:"device_id"`                     // Для обратной совместимости, если нужно
+	DeviceIDs     []string `json:"device_ids"`                    // Список привязанных deviceID
+	MaxDevices    int      `json:"max_devices"`                   // Максимальное кол-во устройств (0 или 1 = 1 устройство)
+	ExpiresAt     int64    `json:"expires_at"`                    // unix timestamp
+	DownBytes     int64    `json:"down_bytes"`                    // скачано клиентом
+	UpBytes       int64    `json:"up_bytes"`                      // отдано клиентом
+	TrafficLimit  int64    `json:"traffic_limit_bytes,omitempty"` // 0 = без лимита
 	VkHash        string   `json:"vk_hash,omitempty"`
 	Ports         string   `json:"ports,omitempty"` // "dtls,wg,tun"
 	IsDeactivated bool     `json:"is_deactivated,omitempty"`

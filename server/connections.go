@@ -170,6 +170,10 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 			log.Printf("[WG] Отказ: пароль %s деактивирован, запрос от %s", maskPassword(password), deviceID)
 			dbMutex.Unlock()
 			return
+		} else if valid && isGenPass && trafficLimitReached(entry) {
+			clientConn.Write([]byte("DENIED:traffic_limit"))
+			dbMutex.Unlock()
+			return
 		} else if valid && isGenPass && !entry.canConnectAndBind(deviceID) {
 			// Достигнут лимит устройств или привязано к другому устройству
 			clientConn.Write([]byte("DENIED:device_mismatch"))
@@ -292,6 +296,11 @@ func handleConn(ctx context.Context, clientConn net.Conn, wgEndpoint string, wgD
 		if !valid || !bound {
 			dbMutex.Unlock()
 			clientConn.Write([]byte("DENIED:device_mismatch"))
+			return
+		}
+		if isGenPass && trafficLimitReached(entry) {
+			dbMutex.Unlock()
+			clientConn.Write([]byte("DENIED:traffic_limit"))
 			return
 		}
 		dbMutex.Unlock()

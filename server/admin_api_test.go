@@ -76,10 +76,91 @@ func postAdminForm(path, key string, form url.Values) *httptest.ResponseRecorder
 		handleAdminUnbindDevice(response, request)
 	case "/admin/qrcode":
 		handleAdminQRCode(response, request)
+	case "/admin/passwords/reset-traffic":
+		handleAdminResetTraffic(response, request)
 	default:
 		panic("unsupported test path: " + path)
 	}
 	return response
+}
+
+func TestAdminCreateAndUpdateTrafficLimit(t *testing.T) {
+	cleanup := setupAdminCreateTest(t)
+	defer cleanup()
+
+	request := httptest.NewRequest(http.MethodPost, "/admin/passwords", strings.NewReader(url.Values{
+		"vk_hash":             {"test-hash"},
+		"traffic_limit_bytes": {"1048576"},
+	}.Encode()))
+	request.Header.Set("Authorization", "Bearer admin-api-test-token")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handleAdminCreatePassword(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var view adminPasswordView
+	if err := json.Unmarshal(response.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if view.TrafficLimit != 1048576 {
+		t.Fatalf("traffic limit = %d, want 1048576", view.TrafficLimit)
+	}
+
+	updateRequest := httptest.NewRequest(http.MethodPost, "/admin/passwords/update", strings.NewReader(url.Values{
+		"password":            {view.Password},
+		"traffic_limit_bytes": {"0"},
+	}.Encode()))
+	updateRequest.Header.Set("Authorization", "Bearer admin-api-test-token")
+	updateRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	updated := httptest.NewRecorder()
+	handleAdminUpdatePassword(updated, updateRequest)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", updated.Code, updated.Body.String())
+	}
+	view = adminPasswordView{}
+	if err := json.Unmarshal(updated.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if view.TrafficLimit != 0 {
+		t.Fatalf("traffic limit after clearing = %d, want 0", view.TrafficLimit)
+	}
+}
+
+func TestAdminResetTrafficClearsCounters(t *testing.T) {
+	cleanup := setupAdminCreateTest(t)
+	defer cleanup()
+	db.Passwords["test-password"] = &PasswordEntry{
+		DeviceIDs: []string{"device-a"}, UpBytes: 100, DownBytes: 200,
+	}
+	db.Devices["device-a"] = &ClientDevice{DeviceID: "device-a", UpBytes: 100, DownBytes: 200}
+	response := postAdminForm("/admin/passwords/reset-traffic", "", url.Values{"password": {"test-password"}})
+	if response.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, body = %s", response.Code, response.Body.String())
+	}
+	entry := db.Passwords["test-password"]
+	if entry.UpBytes != 0 || entry.DownBytes != 0 || db.Devices["device-a"].UpBytes != 0 || db.Devices["device-a"].DownBytes != 0 {
+		t.Fatalf("traffic counters not cleared: entry=%+v device=%+v", entry, db.Devices["device-a"])
+	}
+}
+
+func TestTrafficLimitReached(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		entry *PasswordEntry
+		want  bool
+	}{
+		{name: "unlimited", entry: &PasswordEntry{UpBytes: 500, DownBytes: 500}, want: false},
+		{name: "below", entry: &PasswordEntry{TrafficLimit: 1001, UpBytes: 500, DownBytes: 500}, want: false},
+		{name: "at limit", entry: &PasswordEntry{TrafficLimit: 1000, UpBytes: 500, DownBytes: 500}, want: true},
+		{name: "over limit", entry: &PasswordEntry{TrafficLimit: 900, UpBytes: 500, DownBytes: 500}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := trafficLimitReached(test.entry); got != test.want {
+				t.Fatalf("trafficLimitReached() = %v, want %v", got, test.want)
+			}
+		})
+	}
 }
 
 func postAdminCreatePassword(key, vkHash string) *httptest.ResponseRecorder {
