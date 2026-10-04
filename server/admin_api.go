@@ -1000,10 +1000,6 @@ func handleAdminVKHashCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxyURL := strings.TrimSpace(r.FormValue("proxy_url"))
-	if proxyURL == "" {
-		writeAdminError(w, http.StatusBadRequest, "proxy_url is required")
-		return
-	}
 	dbMutex.Lock()
 	hashes := append([]string(nil), db.VKHashLibrary...)
 	dbMutex.Unlock()
@@ -1033,10 +1029,6 @@ func handleAdminVKHashRemoveNonWorking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxyURL := strings.TrimSpace(r.FormValue("proxy_url"))
-	if proxyURL == "" {
-		writeAdminError(w, http.StatusBadRequest, "proxy_url is required")
-		return
-	}
 	dbMutex.Lock()
 	hashes := append([]string(nil), db.VKHashLibrary...)
 	dbMutex.Unlock()

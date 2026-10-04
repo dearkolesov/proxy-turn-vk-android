@@ -26,7 +26,11 @@ type vkHashCheckResult struct {
 }
 
 func newVKHashCheckClient(proxyURL string) (*http.Client, error) {
-	parsed, err := url.Parse(strings.TrimSpace(proxyURL))
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return &http.Client{Timeout: 20 * time.Second}, nil
+	}
+	parsed, err := url.Parse(proxyURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("proxy_url must be a complete socks5:// or http:// URL")
 	}

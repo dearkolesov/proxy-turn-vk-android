@@ -225,8 +225,8 @@ func TestAdminVKHashLibraryCRUD(t *testing.T) {
 }
 
 func TestVKHashCheckProxyURLValidation(t *testing.T) {
-	if _, err := newVKHashCheckClient(""); err == nil {
-		t.Fatal("empty proxy URL was accepted")
+	if client, err := newVKHashCheckClient(""); err != nil || client == nil {
+		t.Fatalf("direct client rejected: %v", err)
 	}
 	if _, err := newVKHashCheckClient("ftp://localhost:21"); err == nil {
 		t.Fatal("unsupported proxy scheme was accepted")

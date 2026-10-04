@@ -245,10 +245,6 @@
 
   async function checkLibraryHashes(removeNonWorking = false) {
     const proxyURL = hashCheckProxy();
-    if (!proxyURL) {
-      setHashLibraryStatus("Укажите SOCKS5 или HTTP proxy.", true);
-      return;
-    }
     const button = byId(removeNonWorking ? "remove-bad-library-hashes" : "check-library-hashes");
     button.disabled = true;
     setHashLibraryStatus("Проверяем хеши через прокси…");
@@ -824,7 +820,7 @@
   byId("remove-bad-library-hashes").addEventListener("click", () => checkLibraryHashes(true));
   byId("clear-library-hashes").addEventListener("click", clearLibraryHashes);
   byId("pick-library-hashes").addEventListener("click", pickLibraryHashes);
-  byId("hash-check-proxy").value = localStorage.getItem(HASH_CHECK_PROXY_KEY) || "socks5://localhost:9393";
+  byId("hash-check-proxy").value = localStorage.getItem(HASH_CHECK_PROXY_KEY) || "";
   byId("refresh-button").addEventListener("click", refresh);
   byId("logout-button").addEventListener("click", () => logout());
   byId("search-input").addEventListener("input", (event) => {
