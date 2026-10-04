@@ -44,7 +44,12 @@ func setupXrayTProxy(wgIface string, port, mark, table int) (func(), error) {
 		}
 		sysctls[i].value = value
 	}
-	if _, err := runCmd("iptables", "-t", "mangle", "-N", tproxyChainName(mark)); err != nil {
+	chain := tproxyChainName(mark)
+	// A previous SIGKILL can leave the managed chain behind. Remove only this
+	// qWDTT-named jump/chain before rebuilding it.
+	_ = runCmdSilent("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", wgIface, "-j", chain)
+	removeXrayTProxyChain(chain)
+	if _, err := runCmd("iptables", "-t", "mangle", "-N", chain); err != nil {
 		return func() {}, fmt.Errorf("create managed TProxy chain: %w", err)
 	}
 	for _, setting := range []string{
@@ -63,7 +68,6 @@ func setupXrayTProxy(wgIface string, port, mark, table int) (func(), error) {
 	markValue := strconv.Itoa(mark)
 	markMask := markValue + "/0xffff"
 	tableValue := strconv.Itoa(table)
-	chain := tproxyChainName(mark)
 	removeManagedWGNAT(extIface)
 	if _, err := runCmd("ip", "rule", "add", "fwmark", markMask, "table", tableValue); err != nil {
 		removeXrayTProxyChain(chain)
@@ -97,7 +101,9 @@ func setupXrayTProxy(wgIface string, port, mark, table int) (func(), error) {
 		return func() {}, fmt.Errorf("attach TProxy chain: %w", err)
 	}
 
+	natType = fmt.Sprintf("XRAY TPROXY 127.0.0.1:%d ✅", port)
 	log.Printf("[XRAY] TProxy: %s -> 127.0.0.1:%d, mark=%s, table=%s", wgIface, port, markValue, tableValue)
+	log.Printf("[XRAY] Verify: ip rule fwmark %s table %s; local route table %s; iptables chain %s", markMask, tableValue, tableValue, chain)
 	return func() {
 		cleanupXrayTProxy(wgIface, chain, markMask, tableValue, sysctls, extIface)
 	}, nil
