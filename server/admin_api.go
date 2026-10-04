@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,22 @@ func passwordFingerprint(password string) string {
 }
 
 func splitVKHashes(value string) []string {
+	linkMatches := vkJoinLinkPattern.FindAllStringSubmatch(value, -1)
+	if len(linkMatches) > 0 {
+		seen := make(map[string]struct{}, len(linkMatches))
+		hashes := make([]string, 0, len(linkMatches))
+		for _, match := range linkMatches {
+			if len(match) < 2 || match[1] == "" {
+				continue
+			}
+			if _, exists := seen[match[1]]; exists {
+				continue
+			}
+			seen[match[1]] = struct{}{}
+			hashes = append(hashes, match[1])
+		}
+		return hashes
+	}
 	parts := strings.FieldsFunc(value, func(r rune) bool {
 		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
 	})
@@ -67,6 +84,8 @@ func splitVKHashes(value string) []string {
 	}
 	return hashes
 }
+
+var vkJoinLinkPattern = regexp.MustCompile(`(?i)(?:https?://)?(?:www\.|m\.)?(?:vk\.com|vk\.ru)/call/join/([A-Za-z0-9_-]+)`)
 
 func mergeVKHashes(existing []string, additions []string) []string {
 	merged := splitVKHashes(strings.Join(existing, ","))

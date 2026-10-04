@@ -165,10 +165,15 @@ func TestTrafficLimitReached(t *testing.T) {
 }
 
 func TestVKHashLibraryHelpersDeduplicate(t *testing.T) {
-	got := splitVKHashes("one, two\none;one")
-	want := []string{"one", "two"}
+	got := splitVKHashes("Привет, звонок: https://vk.com/call/join/hash-one. Ещё https://vk.ru/call/join/hash_two")
+	want := []string{"hash-one", "hash_two"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("splitVKHashes() = %#v, want %#v", got, want)
+	}
+	got = splitVKHashes("one, two\none;one")
+	want = []string{"one", "two"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitVKHashes() bare = %#v, want %#v", got, want)
 	}
 	merged := mergeVKHashes([]string{"two", "three"}, []string{"one", "two"})
 	want = []string{"two", "three", "one"}
