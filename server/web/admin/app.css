@@ -1231,6 +1231,16 @@ tbody tr:hover {
   justify-content: space-between;
 }
 @media (max-width: 760px) {
+  .hash-library-panel {
+    grid-template-columns: 1fr;
+  }
+  .hash-library-actions,
+  .hash-library-panel .server-address-status {
+    grid-column: 1;
+  }
+  .hash-library-actions {
+    flex-wrap: wrap;
+  }
   .server-address-panel {
     grid-template-columns: 1fr;
   }

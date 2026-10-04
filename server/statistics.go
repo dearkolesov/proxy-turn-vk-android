@@ -72,7 +72,10 @@ func addRawDownlinkBytes(deviceID string, n int64) {
 }
 
 func trafficLimitReached(entry *PasswordEntry) bool {
-	return entry != nil && entry.TrafficLimit > 0 && entry.UpBytes+entry.DownBytes >= entry.TrafficLimit
+	if entry == nil || entry.TrafficLimit <= 0 {
+		return false
+	}
+	return entry.UpBytes >= entry.TrafficLimit || entry.DownBytes >= entry.TrafficLimit-entry.UpBytes
 }
 
 func limitedPasswordsLocked() []string {
@@ -92,7 +95,10 @@ func resetRawTrafficCounters(deviceIDs []string) {
 	}
 	rawDeviceTrafficMu.Lock()
 	for deviceID := range set {
-		delete(rawDeviceTraffic, deviceID)
+		if counter := rawDeviceTraffic[deviceID]; counter != nil {
+			counter.up = 0
+			counter.down = 0
+		}
 	}
 	rawDeviceTrafficMu.Unlock()
 }
