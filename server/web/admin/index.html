@@ -98,6 +98,37 @@
           </button>
         </section>
 
+        <section class="server-address-panel" aria-labelledby="server-address-title">
+          <div class="server-address-copy">
+            <div class="eyebrow">АДРЕС ПОДКЛЮЧЕНИЯ</div>
+            <h2 id="server-address-title">Внешний адрес сервера</h2>
+            <p>
+              Этот адрес попадёт в поле <code>peer</code> быстрых ссылок и QR-кодов.
+              Укажите IP или hostname, доступный Android-клиенту.
+            </p>
+          </div>
+          <div class="server-address-controls">
+            <label class="server-address-input" for="server-address">
+              <span class="sr-only">Внешний IP или hostname</span>
+              <input
+                id="server-address"
+                type="text"
+                inputmode="url"
+                autocomplete="off"
+                placeholder="203.0.113.10 или vpn.example.com"
+                spellcheck="false"
+              />
+            </label>
+            <button id="detect-server-address" class="button button-quiet" type="button">
+              Определить автоматически
+            </button>
+            <button id="save-server-address" class="button button-primary" type="button">
+              Сохранить
+            </button>
+          </div>
+          <p id="server-address-status" class="server-address-status" role="status"></p>
+        </section>
+
         <section class="overview" aria-label="Сводка">
           <div class="overview-cell">
             <span class="overview-label">Всего ключей</span

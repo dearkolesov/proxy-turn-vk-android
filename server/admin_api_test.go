@@ -281,6 +281,17 @@ func TestAdminQRCodeReturnsPNG(t *testing.T) {
 	}
 }
 
+func TestAdminPublicAddressRequiresAuthorization(t *testing.T) {
+	cleanup := setupAdminCreateTest(t)
+	defer cleanup()
+	request := httptest.NewRequest(http.MethodGet, "/admin/public-address", nil)
+	response := httptest.NewRecorder()
+	handleAdminPublicAddress(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("public address status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestHealthzReportsReadiness(t *testing.T) {
 	previousWGDevice := globalWgDev
 	previousKeyStore := serverWrapKeys
